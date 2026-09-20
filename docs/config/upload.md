@@ -76,13 +76,40 @@ opt-in end-to-end suite exercises a deployed IPP against a live Immich:
 
 ```bash
 export E2E_IMMICH_URL=https://immich.example.com
-export E2E_IMMICH_API_KEY=...        # may create/delete albums, links, assets
+export E2E_IMMICH_API_KEY=...        # scoped key, see below
 export E2E_IPP_URL=http://ipp-host:3000   # direct, NOT via a reverse proxy
 export E2E_UPLOAD_MAX_MB=2           # optional; must match the instance's
                                      # ipp.upload.maxFileSizeMb, and be <= 8,
                                      # or the size tests are skipped
 npm run test:e2e
 ```
+
+### Why an Immich API key, and how little it needs
+
+Nothing in the upload path uses it. An upload is authorised by the share key
+alone — that is the entire point of the feature, and the suite would be
+worthless if it smuggled an API key into those requests.
+
+The key exists to own the fixtures: create a throwaway album and its shared
+links, read the album back to assert what landed, and delete all of it
+afterwards. A share key cannot do any of that — it can upload into one album
+and read that album, nothing more.
+
+So it does **not** need to be an admin key. This exact set was verified
+against Immich 3.2.2 by running the whole suite with a key holding only:
+
+```
+album.create  album.read  album.delete
+sharedLink.create  sharedLink.delete
+asset.read  asset.delete
+```
+
+Create it in Immich under **Account Settings → API Keys**, tick those seven,
+and nothing else. It never touches photos outside the albums it creates.
+
+The alternative — hand-made fixtures passed in as share keys — would need one
+link per scenario (upload-enabled, read-only, slug, password-protected), and
+would leave every uploaded test asset behind in your library, run after run.
 
 The target IPP needs `ipp.upload.enabled: true`. Without the three required
 variables the whole suite is skipped, so `npm test` on a laptop never tries to
