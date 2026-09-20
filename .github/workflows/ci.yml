@@ -1,0 +1,132 @@
+name: CI
+
+# Secret-free by design. The integration job stands up its own Immich, mints
+# its own scoped API key and throws all of it away - nothing here needs a
+# credential from repository settings, so it runs unchanged on a fork or a
+# pull request from one.
+on:
+  push:
+    branches: ['**']
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  unit:
+    name: Unit tests, lint and types
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: app
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+      - run: npm ci
+      - run: npx tsc --noEmit
+      - run: npx tsc --noEmit -p tsconfig.client.json
+      - run: npx eslint src tests --ext .ts,.tsx
+      # Excludes tests/e2e and tests/browser by config: this job has no Immich.
+      - run: npm test
+
+  integration:
+    name: Against a real Immich
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+
+      - name: Install dependencies
+        working-directory: app
+        run: npm ci
+
+      - name: Start Immich and IPP
+        run: docker compose -f test/immich-stack.yml up -d --build --wait
+
+      # Three public API calls against an empty instance. The key it mints is
+      # scoped to fixtures and cannot upload - guest upload is authorised by
+      # the share key alone, which is the thing under test.
+      - name: Bootstrap Immich
+        run: ./test/bootstrap.sh >> "$GITHUB_ENV"
+
+      - name: Request-level suite
+        working-directory: app
+        run: npm run test:e2e
+
+      - name: Install browser
+        working-directory: app
+        run: npx playwright install --with-deps chromium
+
+      - name: Browser suite
+        working-directory: app
+        run: npm run test:browser
+
+      - name: Immich logs on failure
+        if: failure()
+        run: docker compose -f test/immich-stack.yml logs --tail=200
+
+      - name: Playwright artefacts on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: app/test-results/
+          retention-days: 7
+
+      - name: Tear down
+        if: always()
+        run: docker compose -f test/immich-stack.yml down -v
+
+  image:
+    name: Container image
+    runs-on: ubuntu-latest
+    needs: [unit, integration]
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+
+      # Only authenticate when we are actually going to push. Builds on a
+      # pull request stay local, so a fork PR never needs package write.
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Tags
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=semver,pattern={{version}}
+            type=sha,format=short
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            PACKAGE_VERSION=${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

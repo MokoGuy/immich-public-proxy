@@ -87,6 +87,30 @@ export E2E_UPLOAD_MAX_MB=2           # must match the instance's configured
 npm run test:e2e
 ```
 
+### Running against a throwaway Immich
+
+You do not need a personal instance. `test/immich-stack.yml` starts a pinned,
+machine-learning-free Immich plus an IPP built from the checkout, and
+`test/bootstrap.sh` takes it from empty to usable:
+
+```bash
+docker compose -f test/immich-stack.yml up -d --build --wait
+eval "$(./test/bootstrap.sh)"        # exports the four variables below
+cd app && npm run test:e2e && npm run test:browser
+docker compose -f test/immich-stack.yml down -v
+```
+
+Measured on this stack: **8 seconds** from empty volumes to a bootstrapped
+Immich with IPP attached, about **1.5 GB** resident and **3 GB** of images.
+Dropping the ML container is most of that — the CUDA image alone is 4.5 GB,
+and nothing here needs face detection or CLIP.
+
+This is what CI uses, which is why CI needs no secrets at all.
+
+The version is pinned deliberately. Running against "whatever is currently
+installed" cannot tell you that Immich changed; running against a version you
+bump on purpose can.
+
 ### Why an Immich API key, and how little it needs
 
 Nothing in the upload path uses it. An upload is authorised by the share key
