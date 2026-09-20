@@ -139,6 +139,26 @@ async function resolveSharedAsset (req: Request, keyType: KeyType): Promise<Shar
 }
 
 /**
+ * Fail an upload, signalling that the connection must not be reused.
+ *
+ * Every rejection here can land while the visitor is still sending: the gate
+ * checks answer before reading a byte, and the size cap fires part-way
+ * through. The unread remainder then sits on the socket, so the connection is
+ * no longer safe to keep alive.
+ *
+ * This is correct but NOT sufficient in front of every reverse proxy - see
+ * the "reverse proxies and early rejections" note in docs/config/upload.md.
+ * Draining the body first and piping through an intermediate stream were both
+ * tried and both made it worse; the honest position is that the application
+ * behaves correctly on a direct connection and the proxy hop is its own
+ * problem.
+ */
+function failUpload (res: Response, status: number, reason: string): void {
+  if (!res.headersSent) res.setHeader('Connection', 'close')
+  respondToInvalidRequest(res, status, reason)
+}
+
+/**
  * Accept an ISO 8601 timestamp from the client, rejecting anything unparseable
  * or implausibly far in the future (a bad clock should not file a holiday
  * photo under the year 3000). Returns a normalised ISO string, or undefined.
@@ -280,11 +300,12 @@ app.post('/:shareType(share|s)/:key/upload', decodeCookie, asyncHandler(async (r
   // Same guard the gallery route applies: with `ipp.allowSlugLinks` off, the
   // slug is not a credential at all - it must not authorise a write either.
   if (keyType === KeyType.slug && !getConfigOption('ipp.allowSlugLinks', true)) {
-    respondToInvalidRequest(res, 404, 'Slug links are disabled in config.json')
+    failUpload(res, 404, 'Slug links are disabled in config.json')
     return
   }
 
   if (uploadsInFlight >= UPLOAD_MAX_CONCURRENT) {
+    res.setHeader('Connection', 'close')
     res.status(503).set('Retry-After', '5').json({ error: 'busy' })
     return
   }
@@ -308,24 +329,24 @@ app.post('/:shareType(share|s)/:key/upload', decodeCookie, asyncHandler(async (r
 async function handleUpload (req: Request, res: Response, keyType: KeyType, abort: AbortController): Promise<void> {
   const resolved = await resolveShare(req, keyType)
   if (!resolved.ok) {
-    respondToInvalidRequest(res, resolved.status, resolved.reason)
+    failUpload(res, resolved.status, resolved.reason)
     return
   }
   if (!canUpload(resolved.link)) {
     // Deliberately the same generic response as an unknown share: an
     // upload-disabled link should not be distinguishable from a bad key.
-    respondToInvalidRequest(res, 404, 'Uploads not enabled for this share')
+    failUpload(res, 404, 'Uploads not enabled for this share')
     return
   }
 
   const contentType = String(req.headers['content-type'] || '')
   if (!/^(image|video)\//.test(contentType)) {
-    respondToInvalidRequest(res, 400, 'Unsupported upload content type')
+    failUpload(res, 400, 'Unsupported upload content type')
     return
   }
   const createdAt = parseCreatedAt(req.headers['x-ipp-created-at'])
   if (!createdAt) {
-    respondToInvalidRequest(res, 400, 'Missing or invalid X-IPP-Created-At')
+    failUpload(res, 400, 'Missing or invalid X-IPP-Created-At')
     return
   }
 
@@ -334,7 +355,7 @@ async function handleUpload (req: Request, res: Response, keyType: KeyType, abor
   // stream/upload.ts, because a chunked request carries no Content-Length.
   const declared = Number(req.headers['content-length'] || 0)
   if (declared && declared > maxBytes) {
-    respondToInvalidRequest(res, 413, 'Upload too large')
+    failUpload(res, 413, 'Upload too large')
     return
   }
 
@@ -362,7 +383,7 @@ async function handleUpload (req: Request, res: Response, keyType: KeyType, abor
       return
     }
     const status = outcome.reason === 'too-large' ? 413 : 502
-    respondToInvalidRequest(res, status, 'Upload failed: ' + outcome.reason)
+    failUpload(res, status, 'Upload failed: ' + outcome.reason)
     return
   }
 

@@ -68,6 +68,50 @@ successful upload drops IPP's memoised share (120 s TTL). Without both, a
 visitor would reload into a stale page that does not contain the photo they
 just added.
 
+## Testing against a real Immich
+
+The unit suite stubs `fetch`, so it cannot notice when Immich changes the
+upload DTO, the shared-link permission map or the timeline enumeration. An
+opt-in end-to-end suite exercises a deployed IPP against a live Immich:
+
+```bash
+export E2E_IMMICH_URL=https://immich.example.com
+export E2E_IMMICH_API_KEY=...        # may create/delete albums, links, assets
+export E2E_IPP_URL=https://share.example.com
+export E2E_UPLOAD_MAX_MB=2           # optional; must match the instance's
+                                     # ipp.upload.maxFileSizeMb, and be <= 8,
+                                     # or the size tests are skipped
+npm run test:e2e
+```
+
+The target IPP needs `ipp.upload.enabled: true`. Without the three required
+variables the whole suite is skipped, so `npm test` on a laptop never tries to
+reach a server — and `npm test` excludes these files entirely regardless.
+
+Fixtures are named `zz-ipp-e2e-*` and torn down in `afterAll`, assets
+force-deleted so nothing is left in the trash. Any teardown failure is printed
+rather than swallowed.
+
+## Reverse proxies and early rejections
+
+The upload route answers before the body has finished arriving whenever it
+refuses one — that is what a size cap is for. On a direct connection this is
+clean: an oversize upload returns `413` every time.
+
+Through a reverse proxy it is not always clean. The proxy can be left holding
+a pooled connection with an unconsumed request body on it, and a later upload
+on that connection comes back as a **502 that never reached IPP at all** (it
+leaves no log line here). Measured against Traefik 3.6: roughly one request in
+six, immediately after an oversize rejection.
+
+Draining the body before responding, and piping the request through an
+intermediate stream, were both implemented and measured — both made it
+strictly worse. The route sets `Connection: close` on every rejection, which
+is the correct signal, and the remainder is the proxy hop's behaviour.
+
+What this does **not** affect: an oversize upload is never stored either way.
+The failure mode is a confusing status code, not a bypassed limit.
+
 ## What this does not do
 
 - **No quota beyond the per-file cap.** Anyone holding the link can keep
