@@ -232,6 +232,21 @@ export async function handleShareRequest (req: IncomingShareRequest, res: Respon
  * Negative results (`valid: false`) and rejections are dropped from the
  * cache immediately so a transient Immich blip doesn't poison the cache.
  */
+/**
+ * Drop the memoised share resolution for one link.
+ *
+ * `shareCache` holds a share (and, for albums, its enumerated asset list) for
+ * 120 s. That is invisible for a read-only proxy, but an upload changes the
+ * album *now*: without this, `resolveSharedAsset` would keep rejecting the
+ * freshly uploaded id as "not in share" until the entry aged out, and the
+ * visitor would watch their own photo 404.
+ *
+ * Must be keyed identically to `getShareByKey`, password included.
+ */
+export function invalidateShare (key: string, password?: string, keyType: KeyType = KeyType.key): void {
+  shareCache.delete(`${keyType}:${key}:${password ?? ''}`)
+}
+
 export function getShareByKey (key: string, password?: string, keyType: KeyType = KeyType.key): Promise<SharedLinkResult> {
   const cacheKey = `${keyType}:${key}:${password ?? ''}`
   // A `{ valid: false }` result is a truthy object, so the default eviction

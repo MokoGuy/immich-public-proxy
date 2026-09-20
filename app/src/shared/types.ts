@@ -107,4 +107,8 @@ export interface InitParams {
   metadataConfig?: MetadataConfig
   groupByDate?: GroupByDateMode | false
   metaBase?: string
+  /** POST target for guest uploads; absent when uploads are off. */
+  uploadPath?: string
+  /** Per-file ceiling in bytes, mirrored client-side for a fast reject. */
+  uploadMaxBytes?: number
 }

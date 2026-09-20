@@ -23,6 +23,9 @@ export interface GalleryProps {
   metadataConfig: MetadataConfig
   groupByDate: GroupByDateMode | false
   metaBase?: string
+  /** POST target for guest uploads; absent when uploads are off. */
+  uploadPath?: string
+  uploadMaxBytes?: number
 }
 
 export function Gallery (props: GalleryProps) {
@@ -32,7 +35,9 @@ export function Gallery (props: GalleryProps) {
     lightboxConfig: props.lightboxConfig,
     metadataConfig: props.metadataConfig,
     groupByDate: props.groupByDate,
-    metaBase: props.metaBase
+    metaBase: props.metaBase,
+    uploadPath: props.uploadPath,
+    uploadMaxBytes: props.uploadMaxBytes
   })
   const firstItem = props.items[0]
   // og:image prefers the album cover (passed via props); for videos, previewUrl
@@ -70,7 +75,7 @@ export function Gallery (props: GalleryProps) {
         <link type="text/css" rel="stylesheet" href={`/share/static/${ASSET_VERSION}/photoswipe-overrides.css`}/>
       </head>
       <body>
-        {(showHeaderText || props.showDownloadZip) && (
+        {(showHeaderText || props.showDownloadZip || props.uploadPath) && (
           <header id="header">
             {showHeaderText && (
               <div class="header-text">
@@ -91,6 +96,16 @@ export function Gallery (props: GalleryProps) {
                 </svg>
               </a>
             )}
+            {props.uploadPath && (
+              <>
+                <input id="upload-input" type="file" accept="image/*,video/*" multiple hidden/>
+                <button id="upload-open" class="header-btn" type="button" title="Add photos" aria-label="Add photos">
+                  <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <path fill="currentColor" d="M19,13H13V19H11V13H5V11H11V5H13V11H19V13Z"/>
+                  </svg>
+                </button>
+              </>
+            )}
           </header>
         )}
         {props.description && (
@@ -98,6 +113,9 @@ export function Gallery (props: GalleryProps) {
         )}
 {/* Container is intentionally empty - web.js's virtualisation manager
             populates it with only the tiles within the viewport buffer. */}
+        {props.uploadPath && (
+          <div id="upload-status" role="status" aria-live="polite" hidden></div>
+        )}
         <div id="gallery"></div>
         {props.showDownloadZip && (
           <div id="select-toolbar" hidden>

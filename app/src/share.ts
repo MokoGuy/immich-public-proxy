@@ -1,4 +1,4 @@
-import { DownloadAll, SharedLink } from './types'
+import { AlbumType, DownloadAll, SharedLink } from './types'
 import { getConfigOption } from './config/access'
 import dayjs from 'dayjs'
 
@@ -31,6 +31,29 @@ export function canDownload (share: SharedLink): boolean {
     // Return Immich's setting for this shared link
     return !!share.allowDownload
   }
+}
+
+/**
+ * Decide whether visitors may upload into this share's album.
+ *
+ * Two independent gates must both be open, and neither is sufficient alone:
+ *   1. `ipp.upload.enabled` - the operator opts the whole instance in. Default
+ *      `false`, so a stock deployment stays read-only exactly as before.
+ *   2. `share.allowUpload` - the share owner enabled "Allow uploads" on this
+ *      specific link in Immich.
+ *
+ * Gate 2 is also enforced by Immich itself: a shared-link key for a link
+ * without `allowUpload` is rejected at `POST /assets` with 401. This check is
+ * therefore a UI gate plus defence in depth, never the only thing standing
+ * between a visitor and a write.
+ *
+ * Only album shares can accept uploads - an individual-asset share has no
+ * album for Immich to file the upload into.
+ */
+export function canUpload (share: SharedLink): boolean {
+  if (!getConfigOption('ipp.upload.enabled', false)) return false
+  if (share.type !== AlbumType.album) return false
+  return !!share.allowUpload
 }
 
 const DEFAULT_EXPIRY_FORMAT = 'YYYY-MM-DD'

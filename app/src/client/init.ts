@@ -12,6 +12,7 @@ import { state } from './state.js'
 import { setupToolbar } from './selection.js'
 import { initLightbox, openLightbox } from './lightbox.js'
 import { computeLayoutAndRender, onScroll } from './virtualisation.js'
+import { setupUpload } from './upload.js'
 
 function readInitParams (): InitParams {
   const el = document.getElementById('ipp-init')
@@ -31,6 +32,7 @@ function init () {
 
   setupToolbar()
   initLightbox()
+  setupUpload(params.uploadPath, params.uploadMaxBytes)
 
   let resizeFrame: number | undefined
   const resizeObserver = new ResizeObserver(() => {

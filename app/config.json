@@ -8,6 +8,11 @@
     "maxZoomQuality": "preview",
     "downloadedFilename": 0,
     "allowDownload": 0,
+    "upload": {
+      "enabled": false,
+      "maxFileSizeMb": 200,
+      "maxConcurrent": 2
+    },
     "allowSlugLinks": true,
     "showHomePage": true,
     "showMetadata": {

@@ -6,7 +6,7 @@ import {
 import { Response } from 'express-serve-static-core'
 import { Asset, AssetType, ImageSize, SharedLink } from '../types'
 import { getConfigOption, getNumericConfigOption } from '../config/access'
-import { canDownload, expiryDate, title } from '../share'
+import { canDownload, canUpload, expiryDate, title } from '../share'
 import { toString } from '../utils/text'
 import { h } from 'preact'
 import { renderPage } from '../view/render'
@@ -115,6 +115,13 @@ export async function gallery (res: Response, share: SharedLink, openItem?: numb
   const metaBase = items.some(item => item.needsDetail) ? '/share/meta/' + share.key : undefined
 
   const downloadAllowed = canDownload(share)
+  // Uploads are addressed with the key exactly as the visitor submitted it,
+  // preserving a /s/<slug> URL. `share.key` is always the canonical key, so
+  // using it here would post a slug visitor onto the wrong credential pair.
+  const uploadAllowed = canUpload(share)
+  const submittedShareType = toString(res.req.params?.shareType) || 'share'
+  const submittedKey = toString(res.req.params?.key) || share.key
+  const uploadPath = uploadAllowed ? '/' + submittedShareType + '/' + submittedKey + '/upload' : undefined
   // Prefer the album's owner-chosen cover for og:image; fall back to first
   // item if the cover asset has been filtered out (e.g. trashed).
   const coverId = share.album?.albumThumbnailAssetId
@@ -151,12 +158,23 @@ export async function gallery (res: Response, share: SharedLink, openItem?: numb
       locationWebLink: !!getConfigOption('ipp.showMetadata.location.webLink', true)
     },
     groupByDate,
-    metaBase
+    metaBase,
+    uploadPath,
+    uploadMaxBytes: uploadAllowed
+      ? Math.max(1, getNumericConfigOption('ipp.upload.maxFileSizeMb', 200)) * 1024 * 1024
+      : undefined
   }
 
-  // HTML gallery page cache time
-  const cacheTime = Math.max(0, getNumericConfigOption('ipp.gallery.cacheTime', 300))
-  res.header('Cache-Control', 'public, max-age=' + cacheTime)
+  // HTML gallery page cache time. An upload-enabled gallery must never be
+  // cached: a visitor who has just added a photo would otherwise reload into
+  // a stale page that does not contain it (and shared caches would serve that
+  // same stale page to everyone else holding the link).
+  if (uploadAllowed) {
+    res.header('Cache-Control', 'no-store')
+  } else {
+    const cacheTime = Math.max(0, getNumericConfigOption('ipp.gallery.cacheTime', 300))
+    res.header('Cache-Control', 'public, max-age=' + cacheTime)
+  }
   res.send(renderPage(h(Gallery, props)))
 }
 
