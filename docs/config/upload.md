@@ -78,9 +78,12 @@ opt-in end-to-end suite exercises a deployed IPP against a live Immich:
 export E2E_IMMICH_URL=https://immich.example.com
 export E2E_IMMICH_API_KEY=...        # scoped key, see below
 export E2E_IPP_URL=http://ipp-host:3000   # direct, NOT via a reverse proxy
-export E2E_UPLOAD_MAX_MB=2           # optional; must match the instance's
-                                     # ipp.upload.maxFileSizeMb, and be <= 8,
-                                     # or the size tests are skipped
+export E2E_UPLOAD_MAX_MB=2           # must match the instance's configured
+                                     # ipp.upload.maxFileSizeMb, and be <= 8.
+                                     # Leave it out and THREE tests skip -
+                                     # both oversize paths and the check that
+                                     # an oversize upload is not filed anyway.
+                                     # A green run without it is incomplete.
 npm run test:e2e
 ```
 
@@ -157,6 +160,26 @@ multipart part), path traversal (reduced to a basename), a bogus session
 cookie (ignored), a `?key=` query parameter alongside the path key (the path
 wins), `/s/<canonical-key>` (404), oversized headers (431), and rejection
 responses that carry an empty body and leak no Immich detail.
+
+## Upstream compatibility: what this depends on
+
+Two dependencies worth knowing about, because they are the ones most likely
+to break on an Immich upgrade:
+
+- **Album enumeration goes through `/api/timeline/buckets` and
+  `/api/timeline/bucket`.** Immich accepts shared-link authentication on both,
+  but marks them **internal** — they are not stable public API. IPP uses them
+  because Immich 3.0 removed album assets from `AlbumResponseDto`, and the
+  Immich web client does the same thing. The e2e suite's own helper reads
+  albums through `POST /api/search/metadata` instead, so a green helper does
+  **not** prove the gallery path still works. The tests that load a gallery
+  page and assert on its contents are what cover it.
+- **`POST /api/search/metadata` with a flat `albumIds`** is deprecated since
+  Immich 3.2.0 in favour of structured filters. Still accepted at 3.2.2; it
+  will need adapting.
+
+Running an ephemeral Immich pinned to one version would make these break
+loudly and on purpose rather than silently in production — see below.
 
 ## Reverse proxies: a deployment note
 

@@ -271,7 +271,10 @@ run('guest upload against a live Immich', () => {
     it('uploads through /s/<slug> and keeps the canonical-key view fresh', async () => {
       const slug = `${'zz-ipp-e2e'}-${Date.now()}`
       const link = await fx.createShareLink(albumId, { allowUpload: true, slug })
-      if (!link.slug) return // instance has slugs disabled; nothing to assert
+      // Assert the fixture, do not tiptoe around it: returning early here
+      // would let the whole slug branch report green without executing a
+      // single assertion, which is worse than no test at all.
+      expect(link.slug, 'Immich did not persist the slug on the shared link').toBe(slug)
 
       // Warm BOTH identities: the slug gallery, and the canonical-key asset
       // URLs it renders. An upload must invalidate both or the new thumbnail
