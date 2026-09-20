@@ -1,5 +1,32 @@
 # Immich Public Proxy
 
+> ### This is a fork
+>
+> Upstream is **[alangrainger/immich-public-proxy](https://github.com/alangrainger/immich-public-proxy)**,
+> and all the credit for this project belongs there. This fork exists for one
+> reason: it adds **guest upload** — letting visitors add photos to a shared
+> album from the gallery page.
+>
+> Upstream will not take that feature, and its reasoning is sound: IPP's whole
+> value is being strictly read-only, so that exposing it exposes nothing that
+> can modify Immich. See its
+> [feature request policy](https://github.com/alangrainger/immich-public-proxy#feature-requests)
+> and the closed PRs [#212](https://github.com/alangrainger/immich-public-proxy/pull/212)
+> / [#213](https://github.com/alangrainger/immich-public-proxy/pull/213).
+>
+> The feature is **off by default** (`ipp.upload.enabled: false`), so this fork
+> behaves exactly like upstream until an operator opts in. What it does, what
+> it deliberately does not do, and what an anonymous uploader can and cannot
+> reach are documented in **[docs/config/upload.md](docs/config/upload.md)**.
+>
+> Licensed AGPL-3.0, like upstream. If you deploy a modified version where
+> people can reach it over a network, section 13 requires you to offer them
+> its source — link this repository, at the revision you are running, from
+> the service itself.
+>
+> Branch: `feat/guest-upload`, forked at upstream `v3.3.1`.
+
+
 <p align="center" width="100%">
 <img src="docs/public/ipp.svg" width="180" height="180">
 </p>
