@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest'
 import { Readable } from 'stream'
-import { sanitiseFilename, uploadAsset } from '../src/stream/upload'
+import { ensureExtension, sanitiseFilename, uploadAsset } from '../src/stream/upload'
 import { canUpload } from '../src/share'
 import { AlbumType, KeyType, SharedLink } from '../src/types'
 import { loadConfig } from '../src/config/loader'
@@ -143,6 +143,32 @@ describe('sanitiseFilename', () => {
   })
 })
 
+describe('ensureExtension', () => {
+  // Immich answers 400 "Unsupported file type upload" for an extensionless
+  // name, so this is what stands between a header-less client and a failure.
+  it('adds one from the content type when the name has none', () => {
+    expect(ensureExtension('upload', 'image/jpeg')).toBe('upload.jpg')
+    expect(ensureExtension('upload', 'image/png')).toBe('upload.png')
+    expect(ensureExtension('upload', 'video/quicktime')).toBe('upload.mov')
+  })
+
+  it('falls back to the mime subtype for unmapped types', () => {
+    expect(ensureExtension('upload', 'image/bmp')).toBe('upload.bmp')
+  })
+
+  it('ignores parameters on the content type', () => {
+    expect(ensureExtension('upload', 'image/jpeg; charset=binary')).toBe('upload.jpg')
+  })
+
+  it('leaves an existing extension alone', () => {
+    expect(ensureExtension('holiday.png', 'image/jpeg')).toBe('holiday.png')
+  })
+
+  it('does not invent a bogus extension from a junk type', () => {
+    expect(ensureExtension('upload', 'nonsense')).toBe('upload')
+  })
+})
+
 describe('uploadAsset wire format', () => {
   it('sends exactly the fields IPP generates, and the file bytes', async () => {
     const calls = captureFetch()
@@ -163,6 +189,12 @@ describe('uploadAsset wire format', () => {
     expect(body.match(/Content-Disposition: form-data; name="/g)).toHaveLength(5)
     // The SUBMITTED key is what authorises the call.
     expect(url).toContain('key=submitted-key')
+  })
+
+  it('gives an extensionless filename one, so Immich accepts it', async () => {
+    const calls = captureFetch()
+    await uploadAsset(request({ filename: 'upload', contentType: 'image/png' }))
+    expect(calls[0].body).toContain('filename="upload.png"')
   })
 
   it('addresses a slug share with slug=, not key=', async () => {

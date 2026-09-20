@@ -119,12 +119,49 @@ function truncatePreservingExtension (name: string, max: number): string {
 }
 
 /**
+ * Immich derives an asset's type from the filename extension, and answers
+ * `400 Unsupported file type upload` when there is none. A sanitised name can
+ * legitimately end up extensionless - the client omitted the header, or the
+ * original name simply had no dot - so give it one from the declared content
+ * type rather than letting the upload die at the far end.
+ *
+ * The map covers the types worth naming explicitly; anything else falls back
+ * to the mime subtype, which is right far more often than it is wrong
+ * (`image/webp` -> `.webp`).
+ */
+const EXTENSION_BY_TYPE: Record<string, string> = {
+  'image/jpeg': '.jpg',
+  'image/png': '.png',
+  'image/gif': '.gif',
+  'image/webp': '.webp',
+  'image/heic': '.heic',
+  'image/heif': '.heif',
+  'image/avif': '.avif',
+  'image/tiff': '.tiff',
+  'video/mp4': '.mp4',
+  'video/quicktime': '.mov',
+  'video/x-matroska': '.mkv',
+  'video/webm': '.webm'
+}
+
+export function ensureExtension (name: string, contentType: string): string {
+  const dot = name.lastIndexOf('.')
+  if (dot > 0 && name.length - dot <= 12) return name
+  const type = contentType.split(';')[0].trim().toLowerCase()
+  const mapped = EXTENSION_BY_TYPE[type]
+  if (mapped) return name + mapped
+  const subtype = type.split('/')[1]
+  if (subtype && /^[a-z0-9]{1,10}$/.test(subtype)) return name + '.' + subtype
+  return name
+}
+
+/**
  * Yield the multipart body: generated text fields, then the visitor's bytes,
  * then the closing boundary. Counting happens here so an over-size upload is
  * cut off mid-stream rather than after we have already relayed it all.
  */
 async function * multipartBody (req: UploadRequest, boundary: string, st: UploadState): AsyncGenerator<Buffer> {
-  const filename = sanitiseFilename(req.filename)
+  const filename = ensureExtension(sanitiseFilename(req.filename), req.contentType)
   const field = (name: string, value: string) =>
     Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="${name}"\r\n\r\n${value}\r\n`)
 
