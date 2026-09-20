@@ -33,7 +33,7 @@ function share (over: Partial<SharedLink> = {}): SharedLink {
  * need a real local HTTP server and are not covered here.
  */
 function captureFetch (response: unknown = { id: 'new-asset', status: 'created' }, ok = true) {
-  const calls: { url: string, init: RequestInit & { body?: unknown }, body: string }[] = []
+  const calls: { url: string, init: RequestInit & { body?: unknown }, body: string, raw: Buffer }[] = []
   vi.stubGlobal('fetch', async (url: string, init: RequestInit & { body?: unknown }) => {
     // Drain the streaming request body the same way undici would.
     const chunks: Buffer[] = []
@@ -44,7 +44,9 @@ function captureFetch (response: unknown = { id: 'new-asset', status: 'created' 
       if (done) break
       chunks.push(Buffer.from(value))
     }
-    calls.push({ url, init, body: Buffer.concat(chunks).toString('utf8') })
+    const raw = Buffer.concat(chunks)
+    // `body` for the text assertions, `raw` for the ones about actual bytes.
+    calls.push({ url, init, body: raw.toString('utf8'), raw })
     return {
       ok,
       status: ok ? 201 : 400,
@@ -55,6 +57,17 @@ function captureFetch (response: unknown = { id: 'new-asset', status: 'created' 
   return calls
 }
 
+/**
+ * Bytes that pass the magic-byte check for the declared type. The sniffer
+ * reads the first 16, so a fixture has to actually look like a JPEG now -
+ * "JPEGBYTES" no longer does.
+ */
+function jpegBytes (size = 32): Buffer {
+  const b = Buffer.alloc(Math.max(16, size), 0x20)
+  b[0] = 0xff; b[1] = 0xd8; b[2] = 0xff
+  return b
+}
+
 function request (over: Record<string, unknown> = {}) {
   return {
     key: 'submitted-key',
@@ -62,7 +75,7 @@ function request (over: Record<string, unknown> = {}) {
     filename: 'holiday.jpg',
     contentType: 'image/jpeg',
     createdAt: '2026-09-20T10:00:00.000Z',
-    body: Readable.from([Buffer.from('JPEGBYTES')]),
+    body: Readable.from([jpegBytes()]),
     maxBytes: 1024,
     ...over
   } as Parameters<typeof uploadAsset>[0]
@@ -169,6 +182,87 @@ describe('ensureExtension', () => {
   })
 })
 
+describe('hostile input', () => {
+  // Findings from a red-team pass against the deployed fork. Each of these is
+  // something an anonymous visitor holding the share link can actually try.
+
+  it('cannot inject an extra multipart part through the filename', async () => {
+    // The payload closes the filename parameter and opens a second part that
+    // sets isFavorite. Verified against a live Immich: the name arrives
+    // flattened and the injected field never takes effect.
+    const calls = captureFetch()
+    const evil = 'a.png"\r\n\r\n--X\r\nContent-Disposition: form-data; name="isFavorite"\r\n\r\ntrue\r\n--X\r\nContent-Disposition: form-data; name="b'
+    await uploadAsset(request({ filename: encodeURIComponent(evil) }))
+    const body = calls[0].body
+    // Still exactly the five fields we generate: the payload did not become a
+    // sixth part. The words survive INSIDE the quoted filename, harmlessly -
+    // what matters is that no CR/LF got through to terminate it.
+    expect(body.match(/Content-Disposition: form-data; name="/g)).toHaveLength(5)
+    const fileLine = body.split('\r\n').find(l => l.includes('filename='))
+    expect(fileLine).toBeTruthy()
+    expect(fileLine).toContain('name="assetData"')
+    expect(fileLine).not.toMatch(/[\r\n]/)
+  })
+
+  it('refuses bytes that do not match the declared content type', async () => {
+    // Immich trusts the filename extension and stores whatever it is given,
+    // so a ZIP announced as image/png lands in the owner's library. On an
+    // anonymous write path that is ours to stop.
+    const zip = Buffer.alloc(32, 0x41)
+    Buffer.from('PK\x03\x04', 'latin1').copy(zip)
+    const calls = captureFetch()
+    const outcome = await uploadAsset(request({
+      contentType: 'image/png', body: Readable.from([zip])
+    }))
+    expect(outcome).toEqual({ ok: false, reason: 'not-media' })
+    expect(calls).toHaveLength(0)
+  })
+
+  it('refuses an empty body rather than relaying a broken upload', async () => {
+    const calls = captureFetch()
+    const outcome = await uploadAsset(request({ body: Readable.from([]) }))
+    expect(outcome).toEqual({ ok: false, reason: 'empty' })
+    expect(calls).toHaveLength(0)
+  })
+
+  it('checks the signature of a file shorter than the sniff window', async () => {
+    // A 4-byte "image" never reaches the 16-byte threshold; the short-file
+    // path has to apply the same check rather than waving it through.
+    captureFetch()
+    const outcome = await uploadAsset(request({
+      contentType: 'image/png', body: Readable.from([Buffer.from([1, 2, 3, 4])])
+    }))
+    expect(outcome).toEqual({ ok: false, reason: 'not-media' })
+  })
+
+  it('accepts a short file that does match', async () => {
+    const calls = captureFetch()
+    const gif = Buffer.from('GIF89a;', 'latin1')
+    const outcome = await uploadAsset(request({
+      contentType: 'image/gif', filename: 'tiny.gif', body: Readable.from([gif])
+    }))
+    expect(outcome).toEqual({ ok: true, id: 'new-asset', status: 'created' })
+    expect(calls[0].raw.includes(gif)).toBe(true)
+  })
+
+  it('lets an unrecognised type through rather than inventing a verdict', async () => {
+    // We only refuse when we know the signature and it disagrees. Rejecting
+    // formats this table has not heard of would break real uploads.
+    const calls = captureFetch()
+    const outcome = await uploadAsset(request({
+      contentType: 'image/x-unheard-of',
+      filename: 'odd.xyz',
+      body: Readable.from([Buffer.alloc(32, 0x5a)])
+    }))
+    expect(outcome.ok).toBe(true)
+    expect(calls).toHaveLength(1)
+  })
+
+  it('flattens a traversal filename to its basename', () => {
+    expect(sanitiseFilename(encodeURIComponent('../../../../etc/passwd.png'))).toBe('passwd.png')
+  })
+})
+
 describe('uploadAsset wire format', () => {
   it('sends exactly the fields IPP generates, and the file bytes', async () => {
     const calls = captureFetch()
@@ -184,7 +278,8 @@ describe('uploadAsset wire format', () => {
     expect(body).toContain('name="fileCreatedAt"')
     expect(body).toContain('name="fileModifiedAt"')
     expect(body).toContain('name="assetData"; filename="holiday.jpg"')
-    expect(body).toContain('JPEGBYTES')
+    // The file's own bytes are relayed untouched, not re-encoded.
+    expect(calls[0].raw.includes(Buffer.from([0xff, 0xd8, 0xff]))).toBe(true)
     // Nothing else: an uploader cannot reach the rest of AssetMediaCreateDto.
     expect(body.match(/Content-Disposition: form-data; name="/g)).toHaveLength(5)
     // The SUBMITTED key is what authorises the call.
@@ -193,7 +288,9 @@ describe('uploadAsset wire format', () => {
 
   it('gives an extensionless filename one, so Immich accepts it', async () => {
     const calls = captureFetch()
-    await uploadAsset(request({ filename: 'upload', contentType: 'image/png' }))
+    const pngHead = Buffer.alloc(32, 0x20)
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).copy(pngHead)
+    await uploadAsset(request({ filename: 'upload', contentType: 'image/png', body: Readable.from([pngHead]) }))
     expect(calls[0].body).toContain('filename="upload.png"')
   })
 
@@ -206,7 +303,7 @@ describe('uploadAsset wire format', () => {
 
   it('aborts mid-stream when the file exceeds maxBytes', async () => {
     const calls = captureFetch()
-    const big = Readable.from([Buffer.alloc(600), Buffer.alloc(600)])
+    const big = Readable.from([jpegBytes(600), jpegBytes(600)])
     const outcome = await uploadAsset(request({ body: big, maxBytes: 1000 }))
     expect(outcome).toEqual({ ok: false, reason: 'too-large' })
     // The producer threw, so the stub never completed a capture at all - that
@@ -227,7 +324,7 @@ describe('uploadAsset wire format', () => {
       }
       return { ok: true, status: 201, json: async () => ({ id: 'x', status: 'created' }), text: async () => '' }
     })
-    const big = Readable.from([Buffer.alloc(600), Buffer.alloc(600)])
+    const big = Readable.from([jpegBytes(600), jpegBytes(600)])
     const outcome = await uploadAsset(request({ body: big, maxBytes: 1000 }))
     expect(outcome).toEqual({ ok: false, reason: 'too-large' })
   })

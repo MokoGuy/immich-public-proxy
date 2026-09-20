@@ -382,7 +382,11 @@ async function handleUpload (req: Request, res: Response, keyType: KeyType, abor
       if (!res.writableEnded) res.end()
       return
     }
-    const status = outcome.reason === 'too-large' ? 413 : 502
+    // 'empty' and 'not-media' are the visitor's mistake, not Immich's: the
+    // body never matched what the request claimed it was.
+    const status = outcome.reason === 'too-large'
+      ? 413
+      : (outcome.reason === 'empty' || outcome.reason === 'not-media') ? 400 : 502
     failUpload(res, status, 'Upload failed: ' + outcome.reason)
     return
   }

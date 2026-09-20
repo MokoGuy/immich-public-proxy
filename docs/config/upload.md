@@ -92,6 +92,45 @@ Fixtures are named `zz-ipp-e2e-*` and torn down in `afterAll`, assets
 force-deleted so nothing is left in the trash. Any teardown failure is printed
 rather than swallowed.
 
+A third layer drives the gallery in a real browser, which is the only way to
+exercise the file input, the drop zone and the status region:
+
+```bash
+npx playwright install chromium   # once
+npm run test:browser
+```
+
+It earns its keep: the first thing it caught was a multi-file selection
+uploading only its first file. Every request on the wire looked correct — the
+page was quietly dropping the rest, because clearing `input.value` empties the
+live `FileList` the upload loop was still iterating.
+
+## What the route refuses
+
+A red-team pass against the deployed fork produced two hardenings:
+
+| Input | Before | Now |
+|---|---|---|
+| ZIP bytes announced as `image/png` | stored | `400` |
+| Empty body | `502` | `400` |
+
+The first is worth spelling out: **Immich decides an asset's type from the
+filename extension and does not look at the bytes**, so `payload.png` is
+accepted and stored whatever it contains — you only find out when thumbnail
+generation fails. That is tolerable for an authenticated client; on an
+anonymous public route it means anyone holding the link can park arbitrary
+content in the owner's library. So the route checks the first 16 bytes against
+the declared type. The rule is one-sided on purpose: a known signature that
+disagrees is refused, an unrecognised type is passed through rather than
+rejecting formats the table has not heard of.
+
+Probes that already behaved correctly and are now covered by tests: CRLF and
+quote injection through `X-IPP-Filename` (flattened, cannot open a second
+multipart part), path traversal (reduced to a basename), a bogus session
+cookie (ignored), a `?key=` query parameter alongside the path key (the path
+wins), `/s/<canonical-key>` (404), oversized headers (431), and rejection
+responses that carry an empty body and leak no Immich detail.
+
 ## Reverse proxies and early rejections
 
 The upload route answers before the body has finished arriving whenever it
@@ -116,7 +155,11 @@ The failure mode is a confusing status code, not a bypassed limit.
 
 - **No quota beyond the per-file cap.** Anyone holding the link can keep
   adding files until the disk fills. Use link expiry and revocation in Immich.
-- **No content moderation.** Uploads land directly in the album.
+- **No content moderation.** Uploads land directly in the album, and appear in
+  the owner's main timeline (`visibility: timeline`), not somewhere quarantined.
+- **No per-format validation beyond the signature check.** The bytes are
+  confirmed to match the declared type (see below), but a genuine image is
+  still a genuine image from a stranger.
 - **The share key is the credential.** For a password-protected link the
   visitor additionally needs the password, which IPP exchanges for an Immich
   `immich_shared_link_token` cookie via `authHeaders()`. For an unprotected

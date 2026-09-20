@@ -6,3 +6,7 @@ app/public/js/
 .directory
 /app/config.dev.json
 .npm-cache/
+
+# Playwright
+app/test-results/
+app/playwright-report/

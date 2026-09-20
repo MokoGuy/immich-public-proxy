@@ -48,7 +48,16 @@ async function sendFile (file: File): Promise<boolean> {
   return res.ok
 }
 
-async function handleFiles (files: FileList): Promise<void> {
+/**
+ * `files` must be a plain array, never the input's live FileList: clearing
+ * `input.value` (which we do so the same file can be picked twice) empties
+ * that list in place, and this function awaits between items. Snapshot first,
+ * or every upload after the first one reads `undefined`.
+ *
+ * Caught only by driving a real browser - the request-level tests upload one
+ * file at a time and never touch the input element.
+ */
+async function handleFiles (files: File[]): Promise<void> {
   if (!target || busy || !files.length) return
   busy = true
   const total = files.length
@@ -91,8 +100,10 @@ export function setupUpload (path?: string, maxBytes?: number): void {
 
   button.addEventListener('click', () => input.click())
   input.addEventListener('change', () => {
-    if (input.files) handleFiles(input.files).catch(() => setStatus('Upload failed.', true))
+    // Snapshot BEFORE resetting the input - see handleFiles.
+    const picked = input.files ? Array.from(input.files) : []
     input.value = ''
+    if (picked.length) handleFiles(picked).catch(() => setStatus('Upload failed.', true))
   })
 
   // Drag-and-drop onto the gallery, for the desktop case.
@@ -106,6 +117,7 @@ export function setupUpload (path?: string, maxBytes?: number): void {
     e.preventDefault()
     dropZone.classList.remove('upload-dragover')
     const dropped = (e as DragEvent).dataTransfer?.files
-    if (dropped) handleFiles(dropped).catch(() => setStatus('Upload failed.', true))
+    const picked = dropped ? Array.from(dropped) : []
+    if (picked.length) handleFiles(picked).catch(() => setStatus('Upload failed.', true))
   })
 }

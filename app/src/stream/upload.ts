@@ -55,7 +55,7 @@ export interface UploadRequest {
 
 export type UploadOutcome =
   | { ok: true, id: string, status: string }
-  | { ok: false, reason: 'too-large' | 'aborted' | 'rejected' | 'error' }
+  | { ok: false, reason: 'too-large' | 'aborted' | 'rejected' | 'error' | 'empty' | 'not-media' }
 
 /**
  * Why a flag and not `instanceof` on the caught error: fetch wraps anything
@@ -66,6 +66,8 @@ export type UploadOutcome =
  */
 interface UploadState {
   overflowed: boolean
+  empty: boolean
+  notMedia: boolean
 }
 
 /** Multipart field values we generate; never anything visitor-controlled. */
@@ -116,6 +118,49 @@ function truncatePreservingExtension (name: string, max: number): string {
     return name.slice(0, Math.max(1, max - ext.length)) + ext
   }
   return name.slice(0, max)
+}
+
+/*
+ * Magic-byte check.
+ *
+ * Immich decides an asset's type from the filename extension and does not
+ * look at the bytes on the way in, so `PK\x03\x04...` sent as `payload.png`
+ * is accepted and stored - verified against a live instance. On an
+ * authenticated client that is merely surprising; on an anonymous public
+ * upload route it means anyone holding the link can park arbitrary content in
+ * the owner's library, and only find out when thumbnail generation fails.
+ *
+ * So we check the declared type against the actual bytes. The rule is
+ * deliberately one-sided: if we know the signature for the declared type and
+ * it does not match, refuse. If we do not know it (something exotic), let it
+ * through and leave the decision to Immich, rather than rejecting formats
+ * this table has not heard of.
+ */
+const SNIFF_BYTES = 16
+
+function matchesDeclaredType (contentType: string, head: Buffer): boolean {
+  const type = contentType.split(';')[0].trim().toLowerCase()
+  const starts = (...bytes: number[]) => bytes.every((b, i) => head[i] === b)
+  const at = (offset: number, ascii: string) => head.subarray(offset, offset + ascii.length).toString('latin1') === ascii
+
+  switch (type) {
+    case 'image/png': return starts(0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a)
+    case 'image/jpeg': return starts(0xff, 0xd8, 0xff)
+    case 'image/gif': return at(0, 'GIF8')
+    case 'image/webp': return at(0, 'RIFF') && at(8, 'WEBP')
+    case 'image/tiff': return starts(0x49, 0x49, 0x2a, 0x00) || starts(0x4d, 0x4d, 0x00, 0x2a)
+    case 'image/bmp': return at(0, 'BM')
+    // ISO base media: HEIC/HEIF/AVIF and the MP4/MOV family all carry `ftyp`.
+    case 'image/heic':
+    case 'image/heif':
+    case 'image/avif':
+    case 'video/mp4':
+    case 'video/quicktime': return at(4, 'ftyp')
+    case 'video/x-matroska':
+    case 'video/webm': return starts(0x1a, 0x45, 0xdf, 0xa3)
+    // Unknown to us - Immich still gates on the extension.
+    default: return true
+  }
 }
 
 /**
@@ -176,6 +221,10 @@ async function * multipartBody (req: UploadRequest, boundary: string, st: Upload
   )
 
   let bytes = 0
+  // Hold back just enough of the leading bytes to identify the format. This
+  // is the only buffering in the path, and it is 16 bytes.
+  let head: Buffer | null = Buffer.alloc(0)
+
   for await (const chunk of req.body) {
     bytes += chunk.length
     if (bytes > req.maxBytes) {
@@ -186,7 +235,31 @@ async function * multipartBody (req: UploadRequest, boundary: string, st: Upload
       st.overflowed = true
       throw new UploadTooLarge()
     }
+    if (head) {
+      head = Buffer.concat([head, chunk])
+      if (head.length < SNIFF_BYTES) continue
+      if (!matchesDeclaredType(req.contentType, head)) {
+        st.notMedia = true
+        throw new UploadNotMedia()
+      }
+      yield head
+      head = null
+      continue
+    }
     yield chunk
+  }
+
+  // Short file: never reached the sniff threshold, so decide on what we have.
+  if (head) {
+    if (head.length === 0) {
+      st.empty = true
+      throw new UploadEmpty()
+    }
+    if (!matchesDeclaredType(req.contentType, head)) {
+      st.notMedia = true
+      throw new UploadNotMedia()
+    }
+    yield head
   }
 
   yield Buffer.from(`\r\n--${boundary}--\r\n`)
@@ -196,6 +269,20 @@ class UploadTooLarge extends Error {
   constructor () {
     super('Upload exceeded the configured size limit')
     this.name = 'UploadTooLarge'
+  }
+}
+
+class UploadEmpty extends Error {
+  constructor () {
+    super('Upload had no body')
+    this.name = 'UploadEmpty'
+  }
+}
+
+class UploadNotMedia extends Error {
+  constructor () {
+    super('Upload bytes do not match the declared content type')
+    this.name = 'UploadNotMedia'
   }
 }
 
@@ -212,7 +299,7 @@ export async function uploadAsset (req: UploadRequest): Promise<UploadOutcome> {
     'Content-Type': `multipart/form-data; boundary=${boundary}`
   }
 
-  const st: UploadState = { overflowed: false }
+  const st: UploadState = { overflowed: false, empty: false, notMedia: false }
   const stream = Readable.from(multipartBody(req, boundary, st))
   try {
     const res = await fetch(url, {
@@ -233,6 +320,8 @@ export async function uploadAsset (req: UploadRequest): Promise<UploadOutcome> {
       // - Immich's error text can carry user-controlled values.
       await res.text().catch(() => '')
       if (st.overflowed) return { ok: false, reason: 'too-large' }
+      if (st.empty) return { ok: false, reason: 'empty' }
+      if (st.notMedia) return { ok: false, reason: 'not-media' }
       log.warn(`Immich rejected an upload with status ${res.status}`)
       return { ok: false, reason: 'rejected' }
     }
@@ -243,6 +332,8 @@ export async function uploadAsset (req: UploadRequest): Promise<UploadOutcome> {
     // Classified at the source, because fetch wraps body errors in an opaque
     // TypeError - `instanceof UploadTooLarge` would not survive the trip.
     if (st.overflowed || e instanceof UploadTooLarge) return { ok: false, reason: 'too-large' }
+    if (st.empty || e instanceof UploadEmpty) return { ok: false, reason: 'empty' }
+    if (st.notMedia || e instanceof UploadNotMedia) return { ok: false, reason: 'not-media' }
     if (isAbort(e)) return { ok: false, reason: 'aborted' }
     log.warn(`Upload to Immich failed: ${e instanceof Error ? e.message : String(e)}`)
     return { ok: false, reason: 'error' }
