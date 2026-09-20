@@ -23,8 +23,14 @@ function share (over: Partial<SharedLink> = {}): SharedLink {
 }
 
 /**
- * Capture what uploadAsset actually puts on the wire. Returns the decoded
- * multipart body so tests can assert on the exact fields Immich would see.
+ * Capture what uploadAsset puts on the wire.
+ *
+ * This is a stub, NOT a faithful undici: it always drains the whole request
+ * body before responding, ignores the abort signal, and surfaces stream errors
+ * directly instead of wrapping them in `TypeError('fetch failed')`. It is
+ * therefore adequate for asserting the multipart IPP generates, and NOT
+ * adequate for cancellation, early-rejection or backpressure behaviour - those
+ * need a real local HTTP server and are not covered here.
  */
 function captureFetch (response: unknown = { id: 'new-asset', status: 'created' }, ok = true) {
   const calls: { url: string, init: RequestInit & { body?: unknown }, body: string }[] = []
@@ -62,12 +68,42 @@ function request (over: Record<string, unknown> = {}) {
   } as Parameters<typeof uploadAsset>[0]
 }
 
+/** Load a config with uploads switched on at the instance level. */
+function withUploadsEnabled (): void {
+  process.env.CONFIG = JSON.stringify({ ipp: { upload: { enabled: true } } })
+  loadConfig()
+}
+
 describe('canUpload gating', () => {
-  beforeEach(() => loadConfig())
+  beforeEach(() => {
+    delete process.env.CONFIG
+    loadConfig()
+  })
+
+  afterEach(() => {
+    delete process.env.CONFIG
+    loadConfig()
+  })
 
   it('is closed by default even when Immich allows upload', () => {
     // ipp.upload.enabled defaults to false: a stock deploy stays read-only.
     expect(canUpload(share({ allowUpload: true }))).toBe(false)
+  })
+
+  it('stays closed for a link without allowUpload once the instance opts in', () => {
+    withUploadsEnabled()
+    expect(canUpload(share({ allowUpload: false }))).toBe(false)
+    expect(canUpload(share({}))).toBe(false)
+  })
+
+  it('opens only when both gates are open', () => {
+    withUploadsEnabled()
+    expect(canUpload(share({ allowUpload: true }))).toBe(true)
+  })
+
+  it('refuses an individual share even with both gates open', () => {
+    withUploadsEnabled()
+    expect(canUpload(share({ allowUpload: true, type: AlbumType.individual }))).toBe(false)
   })
 })
 
@@ -85,6 +121,25 @@ describe('sanitiseFilename', () => {
   it('never returns empty', () => {
     expect(sanitiseFilename('')).toBe('upload')
     expect(sanitiseFilename('///')).toBe('upload')
+  })
+
+  it('decodes the percent-encoding the client applies', () => {
+    expect(sanitiseFilename(encodeURIComponent('holiday photo.jpg'))).toBe('holiday photo.jpg')
+    expect(sanitiseFilename(encodeURIComponent('été à Pézac.jpg'))).toBe('été à Pézac.jpg')
+  })
+
+  it('survives a malformed percent sequence instead of dropping the upload', () => {
+    expect(sanitiseFilename('100%-real.jpg')).toBe('100%-real.jpg')
+  })
+
+  it('keeps the extension when truncating a very long name', () => {
+    const out = sanitiseFilename('a'.repeat(400) + '.jpg')
+    expect(out.endsWith('.jpg')).toBe(true)
+    expect(out.length).toBeLessThanOrEqual(255)
+  })
+
+  it('decodes before sanitising, so encoded control characters are still stripped', () => {
+    expect(sanitiseFilename('bad%0D%0AX-Evil: 1.jpg')).not.toMatch(/[\r\n]/)
   })
 })
 
@@ -122,8 +177,27 @@ describe('uploadAsset wire format', () => {
     const big = Readable.from([Buffer.alloc(600), Buffer.alloc(600)])
     const outcome = await uploadAsset(request({ body: big, maxBytes: 1000 }))
     expect(outcome).toEqual({ ok: false, reason: 'too-large' })
-    // The closing boundary is never written, so Immich discards the part.
-    if (calls.length) expect(calls[0].body).not.toContain('--\r\n--')
+    // The producer threw, so the stub never completed a capture at all - that
+    // absence IS the assertion: no complete multipart reached Immich.
+    expect(calls).toHaveLength(0)
+  })
+
+  it('still reports too-large when fetch wraps the producer error', async () => {
+    // Real fetch surfaces a body-iterator failure as TypeError('fetch failed',
+    // { cause }), which defeats an `instanceof UploadTooLarge` check. The
+    // overflow flag is what makes the outcome survive that wrapping.
+    vi.stubGlobal('fetch', async (_url: string, init: RequestInit & { body?: unknown }) => {
+      const reader = (init.body as ReadableStream<Uint8Array>).getReader()
+      try {
+        for (;;) { const { done } = await reader.read(); if (done) break }
+      } catch (e) {
+        throw new TypeError('fetch failed', { cause: e })
+      }
+      return { ok: true, status: 201, json: async () => ({ id: 'x', status: 'created' }), text: async () => '' }
+    })
+    const big = Readable.from([Buffer.alloc(600), Buffer.alloc(600)])
+    const outcome = await uploadAsset(request({ body: big, maxBytes: 1000 }))
+    expect(outcome).toEqual({ ok: false, reason: 'too-large' })
   })
 
   it('reports rejection without surfacing Immich\'s error body', async () => {

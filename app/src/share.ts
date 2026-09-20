@@ -47,8 +47,11 @@ export function canDownload (share: SharedLink): boolean {
  * therefore a UI gate plus defence in depth, never the only thing standing
  * between a visitor and a write.
  *
- * Only album shares can accept uploads - an individual-asset share has no
- * album for Immich to file the upload into.
+ * Uploads are restricted to album shares. This is OUR restriction, not an
+ * Immich limitation - Immich will happily attach an upload to an individual
+ * share's asset list. An individual share is a hand-picked set of photos,
+ * where letting a visitor append to it is rarely what the owner meant, so the
+ * fork keeps the feature to the case it was built for.
  */
 export function canUpload (share: SharedLink): boolean {
   if (!getConfigOption('ipp.upload.enabled', false)) return false

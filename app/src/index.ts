@@ -19,7 +19,6 @@ import crypto from 'crypto'
 import { assetBuffer } from './stream/asset'
 import { downloadAssets } from './stream/download'
 import { uploadAsset } from './stream/upload'
-import { createLimiter } from './utils/limiter'
 import dayjs from 'dayjs'
 import { NextFunction, Request, Response } from 'express-serve-static-core'
 import { Asset, AssetType, ImageSize, KeyType, SharedLink } from './types'
@@ -262,11 +261,51 @@ app.post('/:shareType(share|s)/:key/download', decodeCookie, asyncHandler(async 
  * password, if any, comes from the encrypted session cookie via decodeCookie
  * and is turned into an Immich shared-link login cookie by authHeaders().
  */
-const uploadLimiter = createLimiter(Math.max(1, getNumericConfigOption('ipp.upload.maxConcurrent', 2)))
+const UPLOAD_MAX_CONCURRENT = Math.max(1, getNumericConfigOption('ipp.upload.maxConcurrent', 2))
+/*
+ * Admission control, NOT a queue. `createLimiter` (used by the download path)
+ * parks excess callers indefinitely - fine for a handful of internal fetches,
+ * wrong for an anonymous public write path: each parked request keeps its
+ * socket, its buffered input and its closure alive, and a visitor who
+ * disconnects while queued stays queued. Someone holding an upload link could
+ * accumulate those until the proxy falls over, taking read-only visitors with
+ * it. So we refuse over capacity immediately, before touching the body, and
+ * tell the client to come back.
+ */
+let uploadsInFlight = 0
 
 app.post('/:shareType(share|s)/:key/upload', decodeCookie, asyncHandler(async (req, res) => {
   const keyType = getKeyTypeFromShare(req.params.shareType)
 
+  // Same guard the gallery route applies: with `ipp.allowSlugLinks` off, the
+  // slug is not a credential at all - it must not authorise a write either.
+  if (keyType === KeyType.slug && !getConfigOption('ipp.allowSlugLinks', true)) {
+    respondToInvalidRequest(res, 404, 'Slug links are disabled in config.json')
+    return
+  }
+
+  if (uploadsInFlight >= UPLOAD_MAX_CONCURRENT) {
+    res.status(503).set('Retry-After', '5').json({ error: 'busy' })
+    return
+  }
+
+  // Register disconnect handling BEFORE the first await: the visitor can go
+  // away during share resolution too. `res` close (rather than the request's
+  // 'aborted') also covers a visitor who finished sending and then hung up
+  // while Immich was still working - the same approach stream/asset.ts takes.
+  const abort = new AbortController()
+  const onClose = () => { if (!res.writableEnded) abort.abort() }
+  res.on('close', onClose)
+  if (res.destroyed) abort.abort()
+
+  try {
+    await handleUpload(req, res, keyType, abort)
+  } finally {
+    res.off('close', onClose)
+  }
+}))
+
+async function handleUpload (req: Request, res: Response, keyType: KeyType, abort: AbortController): Promise<void> {
   const resolved = await resolveShare(req, keyType)
   if (!resolved.ok) {
     respondToInvalidRequest(res, resolved.status, resolved.reason)
@@ -299,24 +338,27 @@ app.post('/:shareType(share|s)/:key/upload', decodeCookie, asyncHandler(async (r
     return
   }
 
-  const abort = new AbortController()
-  req.on('aborted', () => abort.abort())
-
-  const outcome = await uploadLimiter(() => uploadAsset({
-    key: req.params.key,
-    keyType,
-    password: req.password,
-    filename: toString(req.headers['x-ipp-filename']) || 'upload',
-    contentType,
-    createdAt,
-    body: req,
-    maxBytes,
-    signal: abort.signal
-  }))
+  uploadsInFlight++
+  let outcome
+  try {
+    outcome = await uploadAsset({
+      key: req.params.key,
+      keyType,
+      password: req.password,
+      filename: toString(req.headers['x-ipp-filename']) || 'upload',
+      contentType,
+      createdAt,
+      body: req,
+      maxBytes,
+      signal: abort.signal
+    })
+  } finally {
+    uploadsInFlight--
+  }
 
   if (!outcome.ok) {
     if (outcome.reason === 'aborted') {
-      res.end()
+      if (!res.writableEnded) res.end()
       return
     }
     const status = outcome.reason === 'too-large' ? 413 : 502
@@ -324,13 +366,24 @@ app.post('/:shareType(share|s)/:key/upload', decodeCookie, asyncHandler(async (r
     return
   }
 
-  // The album just changed. Drop the memoised share so the next gallery
-  // request (and the thumbnail the client is about to ask for) sees the new
-  // asset instead of a 120s-stale asset list.
+  /*
+   * The album just changed, so the memoised share must go - otherwise
+   * `resolveSharedAsset` keeps rejecting the new id as "not in share" for up
+   * to 120s and the visitor watches their own photo 404.
+   *
+   * BOTH identities have to be dropped. A /s/<slug> gallery warms the
+   * `slug:<slug>` entry, but the thumbnail and metadata URLs it renders are
+   * built from the canonical key and warm a separate `key:<canonical>` entry.
+   * Invalidating only the one we were addressed by would refresh the page and
+   * still 404 every new thumbnail on it.
+   */
   invalidateShare(req.params.key, req.password, keyType)
+  if (resolved.link.key && resolved.link.key !== req.params.key) {
+    invalidateShare(resolved.link.key, req.password, KeyType.key)
+  }
 
   res.json({ id: outcome.id, status: outcome.status })
-}))
+}
 
 /*
  * [ROUTE] Catch accidental POST requests to share URLs (e.g. from browser history

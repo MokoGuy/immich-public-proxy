@@ -14,7 +14,7 @@ import {
 import dayjs from 'dayjs'
 import { getConfigOption } from './config/access'
 import { addResponseHeaders } from './http'
-import { canDownload } from './share'
+import { canDownload, canUpload } from './share'
 import { log } from './utils/log'
 import { assetBuffer } from './stream/asset'
 import { downloadAll } from './stream/download'
@@ -206,7 +206,11 @@ export async function handleShareRequest (req: IncomingShareRequest, res: Respon
     // videos default to a gallery unless `singleVideo` is explicitly disabled.
     const directImage = asset.type === AssetType.image && !getConfigOption('ipp.gallery.singleImage')
     const directVideo = asset.type === AssetType.video && !getConfigOption('ipp.gallery.singleVideo', true)
-    if ((directImage || directVideo) && !req.password) {
+    // An upload-enabled album must stay in gallery mode even with a single
+    // asset: the direct-image branch has no page to hang the upload control
+    // on, so the first successful upload would otherwise remove the very UI
+    // the visitor just used.
+    if ((directImage || directVideo) && !req.password && !canUpload(link)) {
       // Output the asset directly rather than a gallery page, unless it's a
       // password-protected link
       await assetBuffer(req, res, link.assets[0], ImageSize.preview, link, directVideo)

@@ -57,6 +57,17 @@ export type UploadOutcome =
   | { ok: true, id: string, status: string }
   | { ok: false, reason: 'too-large' | 'aborted' | 'rejected' | 'error' }
 
+/**
+ * Why a flag and not `instanceof` on the caught error: fetch wraps anything
+ * thrown by a streaming request body in `TypeError('fetch failed', { cause })`,
+ * and undici is free to re-wrap again. Classifying the failure at the point it
+ * happens is the only way to tell "visitor sent too much" apart from "visitor
+ * hung up" once the error has been through that machinery.
+ */
+interface UploadState {
+  overflowed: boolean
+}
+
 /** Multipart field values we generate; never anything visitor-controlled. */
 const DEVICE_ID = 'immich-public-proxy'
 
@@ -67,7 +78,15 @@ const DEVICE_ID = 'immich-public-proxy'
  * `../../etc/passwd` cannot travel upstream as a path.
  */
 export function sanitiseFilename (raw: string): string {
-  const base = raw.split(/[\\/]/).pop() || ''
+  // The client percent-encodes the name so it survives as a header value;
+  // decode once before sanitising, or `holiday photo.jpg` reaches Immich as
+  // `holiday%20photo.jpg`. A malformed sequence throws - keep the raw value
+  // rather than dropping the upload over a filename.
+  let decoded = raw
+  try {
+    decoded = decodeURIComponent(raw)
+  } catch (e) { /* not valid percent-encoding; use as-is */ }
+  const base = decoded.split(/[\\/]/).pop() || ''
   // Drop every C0/C1 control character (CR and LF among them) plus the two
   // characters that can terminate the quoted filename parameter. Filtering
   // by code point rather than a regex keeps this exhaustive: anything below
@@ -80,7 +99,23 @@ export function sanitiseFilename (raw: string): string {
     })
     .join('')
     .trim()
-  return cleaned.slice(0, 255) || 'upload'
+  return truncatePreservingExtension(cleaned, 255) || 'upload'
+}
+
+/**
+ * Trim to `max` characters without eating the extension - Immich derives the
+ * stored file's type from it, so `very-long-name.jpg` must not become
+ * `very-long-nam`.
+ */
+function truncatePreservingExtension (name: string, max: number): string {
+  if (name.length <= max) return name
+  const dot = name.lastIndexOf('.')
+  // Only treat a trailing dot-segment as an extension if it is plausibly one.
+  if (dot > 0 && name.length - dot <= 12) {
+    const ext = name.slice(dot)
+    return name.slice(0, Math.max(1, max - ext.length)) + ext
+  }
+  return name.slice(0, max)
 }
 
 /**
@@ -88,7 +123,7 @@ export function sanitiseFilename (raw: string): string {
  * then the closing boundary. Counting happens here so an over-size upload is
  * cut off mid-stream rather than after we have already relayed it all.
  */
-async function * multipartBody (req: UploadRequest, boundary: string): AsyncGenerator<Buffer> {
+async function * multipartBody (req: UploadRequest, boundary: string, st: UploadState): AsyncGenerator<Buffer> {
   const filename = sanitiseFilename(req.filename)
   const field = (name: string, value: string) =>
     Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="${name}"\r\n\r\n${value}\r\n`)
@@ -107,9 +142,11 @@ async function * multipartBody (req: UploadRequest, boundary: string): AsyncGene
   for await (const chunk of req.body) {
     bytes += chunk.length
     if (bytes > req.maxBytes) {
-      // Throwing here aborts the request body mid-flight, so Immich sees a
-      // broken upload and discards it. Content-Length is not trustworthy for
-      // this check - a chunked request simply omits it.
+      // Mark before throwing: fetch will wrap this error beyond recognition.
+      // Throwing aborts the request body mid-flight, so Immich sees a broken
+      // upload and discards it. Content-Length is not trustworthy for this
+      // check - a chunked request simply omits it.
+      st.overflowed = true
       throw new UploadTooLarge()
     }
     yield chunk
@@ -138,15 +175,19 @@ export async function uploadAsset (req: UploadRequest): Promise<UploadOutcome> {
     'Content-Type': `multipart/form-data; boundary=${boundary}`
   }
 
-  const stream = Readable.from(multipartBody(req, boundary))
+  const st: UploadState = { overflowed: false }
+  const stream = Readable.from(multipartBody(req, boundary, st))
   try {
     const res = await fetch(url, {
       method: 'POST',
       headers,
       body: Readable.toWeb(stream) as ReadableStream<Uint8Array>,
       signal: req.signal,
-      // Required by undici to send a streaming request body: we are not
-      // reading the response before finishing the request.
+      // Required by undici before it will accept a streaming request body.
+      // Note this is NOT a promise that the response arrives only after the
+      // request finishes - undici may hand us a response while we are still
+      // sending, which is why the `finally` below tears the producer down
+      // rather than assuming it ran to completion.
       duplex: 'half'
     } as RequestInit & { duplex: 'half' })
 
@@ -154,6 +195,7 @@ export async function uploadAsset (req: UploadRequest): Promise<UploadOutcome> {
       // Consume the body so the socket can be reused, but log only the status
       // - Immich's error text can carry user-controlled values.
       await res.text().catch(() => '')
+      if (st.overflowed) return { ok: false, reason: 'too-large' }
       log.warn(`Immich rejected an upload with status ${res.status}`)
       return { ok: false, reason: 'rejected' }
     }
@@ -161,11 +203,27 @@ export async function uploadAsset (req: UploadRequest): Promise<UploadOutcome> {
     if (!body?.id) return { ok: false, reason: 'error' }
     return { ok: true, id: body.id, status: body.status || 'created' }
   } catch (e) {
-    if (e instanceof UploadTooLarge) return { ok: false, reason: 'too-large' }
-    if (e instanceof Error && (e.name === 'AbortError' || (e as NodeJS.ErrnoException).code === 'ERR_STREAM_PREMATURE_CLOSE')) {
-      return { ok: false, reason: 'aborted' }
-    }
+    // Classified at the source, because fetch wraps body errors in an opaque
+    // TypeError - `instanceof UploadTooLarge` would not survive the trip.
+    if (st.overflowed || e instanceof UploadTooLarge) return { ok: false, reason: 'too-large' }
+    if (isAbort(e)) return { ok: false, reason: 'aborted' }
     log.warn(`Upload to Immich failed: ${e instanceof Error ? e.message : String(e)}`)
     return { ok: false, reason: 'error' }
+  } finally {
+    // If Immich answered early (or we bailed out), the generator may still be
+    // pulling from the visitor's socket. Destroy it so the slot and the
+    // upstream connection are released rather than lingering.
+    if (!stream.destroyed) stream.destroy()
   }
+}
+
+/** Visitor went away, or our own abort signal fired first. */
+function isAbort (e: unknown): boolean {
+  if (!(e instanceof Error)) return false
+  const code = (e as NodeJS.ErrnoException).code
+  const cause = (e as { cause?: unknown }).cause
+  if (e.name === 'AbortError' || code === 'ERR_STREAM_PREMATURE_CLOSE') return true
+  // fetch wraps the underlying cause; look one level down too.
+  return cause instanceof Error &&
+    (cause.name === 'AbortError' || (cause as NodeJS.ErrnoException).code === 'ERR_STREAM_PREMATURE_CLOSE')
 }

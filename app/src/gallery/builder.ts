@@ -169,9 +169,14 @@ export async function gallery (res: Response, share: SharedLink, openItem?: numb
   // cached: a visitor who has just added a photo would otherwise reload into
   // a stale page that does not contain it (and shared caches would serve that
   // same stale page to everyone else holding the link).
+  const alreadyPrivate = String(res.getHeader('Cache-Control') || '').includes('no-store')
   if (uploadAllowed) {
     res.header('Cache-Control', 'no-store')
-  } else {
+  } else if (!alreadyPrivate) {
+    // Never downgrade: handleShareRequest sets no-store for password-protected
+    // shares before we get here, and the response does not Vary on Cookie, so
+    // a shared cache could otherwise hand one visitor's unlocked gallery to
+    // the next person holding the URL.
     const cacheTime = Math.max(0, getNumericConfigOption('ipp.gallery.cacheTime', 300))
     res.header('Cache-Control', 'public, max-age=' + cacheTime)
   }

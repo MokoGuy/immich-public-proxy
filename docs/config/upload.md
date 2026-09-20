@@ -20,8 +20,10 @@ per-link flag: a shared-link key for a link without `allowUpload` is rejected
 at `POST /assets` with 401, so IPP's check is a UI gate plus defence in depth,
 never the only thing standing between a visitor and a write.
 
-Only **album** shares can accept uploads; an individual-asset share has no
-album for Immich to file the upload into.
+Uploads are restricted to **album** shares. That is a restriction of this
+fork, not of Immich — Immich will attach an upload to an individual share's
+asset list too. An individual share is a hand-picked set of photos, where
+letting a visitor append to it is rarely what the owner meant.
 
 ## Options
 
@@ -71,6 +73,10 @@ just added.
 - **No quota beyond the per-file cap.** Anyone holding the link can keep
   adding files until the disk fills. Use link expiry and revocation in Immich.
 - **No content moderation.** Uploads land directly in the album.
-- **The share key is the only credential.** It travels in URLs, browser
-  history and messages — treat it as a capability you hand out, not an
-  identity.
+- **The share key is the credential.** For a password-protected link the
+  visitor additionally needs the password, which IPP exchanges for an Immich
+  `immich_shared_link_token` cookie via `authHeaders()`. For an unprotected
+  link the key alone is enough, and it travels in URLs, browser history and
+  messages — treat it as a capability you hand out, not an identity.
+- **No per-visitor identity or attribution.** Every upload arrives as the
+  share owner; you cannot tell which friend sent what.
