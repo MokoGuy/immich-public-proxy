@@ -77,7 +77,7 @@ opt-in end-to-end suite exercises a deployed IPP against a live Immich:
 ```bash
 export E2E_IMMICH_URL=https://immich.example.com
 export E2E_IMMICH_API_KEY=...        # may create/delete albums, links, assets
-export E2E_IPP_URL=https://share.example.com
+export E2E_IPP_URL=http://ipp-host:3000   # direct, NOT via a reverse proxy
 export E2E_UPLOAD_MAX_MB=2           # optional; must match the instance's
                                      # ipp.upload.maxFileSizeMb, and be <= 8,
                                      # or the size tests are skipped
@@ -131,25 +131,33 @@ cookie (ignored), a `?key=` query parameter alongside the path key (the path
 wins), `/s/<canonical-key>` (404), oversized headers (431), and rejection
 responses that carry an empty body and leak no Immich detail.
 
-## Reverse proxies and early rejections
+## Reverse proxies: a deployment note
 
-The upload route answers before the body has finished arriving whenever it
-refuses one — that is what a size cap is for. On a direct connection this is
-clean: an oversize upload returns `413` every time.
+Refusing an upload means answering before the body has arrived — that is what
+a size cap is. The connection then carries an unread request remainder, so the
+route sends `Connection: close`, which is the correct signal.
 
-Through a reverse proxy it is not always clean. The proxy can be left holding
-a pooled connection with an unconsumed request body on it, and a later upload
-on that connection comes back as a **502 that never reached IPP at all** (it
-leaves no log line here). Measured against Traefik 3.6: roughly one request in
-six, immediately after an oversize rejection.
+Some reverse proxies still mishandle it. Measured against Traefik 3.6: after
+an oversize rejection, roughly one in six later uploads on that pooled
+connection comes back as a **502 that never reaches IPP** — it leaves no log
+line here, because the request never arrives.
 
-Draining the body before responding, and piping the request through an
-intermediate stream, were both implemented and measured — both made it
-strictly worse. The route sets `Connection: close` on every rejection, which
-is the correct signal, and the remainder is the proxy hop's behaviour.
+This is not something the route bends itself around. Draining the body before
+responding, and piping the request through an intermediate stream, were both
+implemented and measured: the first produced universal 502s, the second hung
+on `100 Continue`. Both were reverted. On a direct connection the answer is
+`413` every time.
 
-What this does **not** affect: an oversize upload is never stored either way.
-The failure mode is a confusing status code, not a bypassed limit.
+Consequences for you:
+
+- **Test against IPP directly.** Point `E2E_IPP_URL` at the container, not at
+  the proxy, or the suite measures the proxy's connection pool instead of this
+  feature.
+- **In production**, a visitor who picks an oversized file may occasionally
+  see a gateway error rather than "file too large". Annoying, not dangerous:
+  the upload is refused and never stored either way. Lowering
+  `ipp.upload.maxFileSizeMb` below what your proxy already rejects at the edge
+  avoids the situation entirely.
 
 ## What this does not do
 

@@ -207,32 +207,21 @@ run('guest upload against a live Immich', () => {
     const sizeIt = c.maxFileMb ? it : it.skip
 
     /*
-     * Why these accept 502 as well as 413.
+     * E2E_IPP_URL must address IPP directly, not through a reverse proxy.
      *
-     * The route answers before the body has finished arriving - that is the
-     * whole point of a cap. Measured against this deployment: hitting IPP
-     * directly returns 413 every single time, but through a reverse proxy the
-     * occasional request lands on a pooled connection that still has an
-     * unconsumed body on it and comes back 502, with no trace in IPP's log
-     * because it never reached the process.
-     *
-     * Draining the body before responding, and piping the request through an
-     * intermediate stream, were both implemented and both made it strictly
-     * worse. So the assertion is the one that actually matters and is
-     * actually true: the upload MUST NOT be accepted. Point E2E_IPP_URL at
-     * the container directly to hold it to the stricter 413.
+     * Refusing an upload means answering before the body has arrived - that is
+     * what a cap is. A proxy in front is then left holding a connection with
+     * an unconsumed request on it, and some later request on that connection
+     * comes back 502 without ever reaching this application. Pointing the
+     * suite at the proxy would mean asserting on the proxy's connection-pool
+     * behaviour instead of on the feature. See docs/config/upload.md.
      */
-    const refused = (status: number) => {
-      expect(status).not.toBe(200)
-      expect([413, 502]).toContain(status)
-    }
-
     sizeIt('refuses an oversize upload declared by Content-Length', async () => {
       const big = makePngOfAtLeast((c.maxFileMb as number) * 1024 * 1024 + 512 * 1024)
       const res = await uploadToIpp(c, `/share/${uploadKey}`, big, {
         filename: 'big.png', createdAt: CREATED_AT
       })
-      refused(res.status)
+      expect(res.status).toBe(413)
     }, 120000)
 
     sizeIt('refuses an oversize chunked upload, which declares no size at all', async () => {
@@ -243,7 +232,7 @@ run('guest upload against a live Immich', () => {
       const res = await uploadToIpp(c, `/share/${uploadKey}`, big, {
         filename: 'big-chunked.png', createdAt: CREATED_AT, chunked: true
       })
-      refused(res.status)
+      expect(res.status).toBe(413)
     }, 120000)
 
     sizeIt('does not file an oversize upload in the album', async () => {

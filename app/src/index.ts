@@ -144,14 +144,13 @@ async function resolveSharedAsset (req: Request, keyType: KeyType): Promise<Shar
  * Every rejection here can land while the visitor is still sending: the gate
  * checks answer before reading a byte, and the size cap fires part-way
  * through. The unread remainder then sits on the socket, so the connection is
- * no longer safe to keep alive.
+ * no longer safe to keep alive and we say so.
  *
- * This is correct but NOT sufficient in front of every reverse proxy - see
- * the "reverse proxies and early rejections" note in docs/config/upload.md.
- * Draining the body first and piping through an intermediate stream were both
- * tried and both made it worse; the honest position is that the application
- * behaves correctly on a direct connection and the proxy hop is its own
- * problem.
+ * Operators putting a reverse proxy in front should read the deployment note
+ * in docs/config/upload.md: some proxies mishandle an early response on a
+ * pooled connection. That is a property of the hop, not something this route
+ * bends itself around - draining the body first and piping through an
+ * intermediate stream were both tried and measured strictly worse.
  */
 function failUpload (res: Response, status: number, reason: string): void {
   if (!res.headersSent) res.setHeader('Connection', 'close')
