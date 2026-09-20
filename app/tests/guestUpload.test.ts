@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest'
 import { Readable } from 'stream'
 import { ensureExtension, sanitiseFilename, uploadAsset } from '../src/stream/upload'
-import { canUpload } from '../src/share'
+import { canUpload, uploadRefusal } from '../src/share'
 import { sourceLabel, sourceUrl } from '../src/source'
 import { AlbumType, KeyType, SharedLink } from '../src/types'
 import { loadConfig } from '../src/config/loader'
@@ -122,6 +122,29 @@ describe('canUpload gating', () => {
   it('refuses an individual share', () => {
     withUploadsEnabled()
     expect(canUpload(share({ type: AlbumType.individual }))).toBe(false)
+  })
+
+  it('names the reason, so the client can explain it', () => {
+    // A bare boolean cannot distinguish "the album filled up while you were
+    // choosing photos" from "this link never accepted uploads".
+    withUploadsEnabled()
+    expect(uploadRefusal(share())).toBe(null)
+    expect(uploadRefusal(share({ expiresAt: null }))).toBe('no-expiry')
+    expect(uploadRefusal(share({ expiresAt: inDays(-1) }))).toBe('expired')
+    expect(uploadRefusal(share({ expiresAt: inDays(99) }))).toBe('expiry-too-far')
+    expect(uploadRefusal(share({ keyType: KeyType.slug }))).toBe('slug')
+    expect(uploadRefusal(share({ allowUpload: false }))).toBe('not-allowed')
+    expect(uploadRefusal(share({ type: AlbumType.individual }))).toBe('not-album')
+    withUploadsEnabled({ maxAssets: 1 })
+    expect(uploadRefusal(share({ assets: [{ id: 'a' }] as never }))).toBe('album-full')
+  })
+
+  it('requirePassword is off by default and enforceable when wanted', () => {
+    withUploadsEnabled()
+    expect(canUpload(share())).toBe(true)
+    withUploadsEnabled({ requirePassword: true })
+    expect(uploadRefusal(share())).toBe('no-password')
+    expect(canUpload(share({ password: 'set' }))).toBe(true)
   })
 
   it('refuses a slug link: readable means guessable', () => {

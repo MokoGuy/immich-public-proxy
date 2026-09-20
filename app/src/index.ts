@@ -25,7 +25,7 @@ import { Asset, AssetType, ImageSize, KeyType, SharedLink } from './types'
 import { getConfigOption, getNumericConfigOption } from './config/access'
 import { loadConfig } from './config/loader'
 import { addResponseHeaders, asyncHandler, errorHandler } from './http'
-import { canDownload, canUpload } from './share'
+import { canDownload, uploadRefusal } from './share'
 import { toString } from './utils/text'
 import { decrypt, encrypt } from './encrypt'
 import { respondToInvalidRequest } from './invalidRequestHandler'
@@ -136,6 +136,25 @@ async function resolveSharedAsset (req: Request, keyType: KeyType): Promise<Shar
     return { ok: false, status: 404, reason: 'Asset not found in share' }
   }
   return { ok: true, link: resolved.link, asset }
+}
+
+/*
+ * Two kinds of failure, answered differently on purpose.
+ *
+ * An unresolvable share - bad key, wrong password - stays generic, so probing
+ * for valid links learns nothing. But once a share HAS resolved, the visitor
+ * demonstrably holds a working link and can see the gallery; telling them why
+ * their upload was refused leaks nothing they could not already observe, and
+ * "Upload failed" is a miserable way to discover that the album filled up
+ * while you were picking photos.
+ *
+ * The body is a machine-readable reason; the client turns it into a sentence
+ * naming the file. Immich's own error text is never relayed - it can carry
+ * user-controlled values.
+ */
+function refuseUpload (res: Response, status: number, reason: string, extra: Record<string, unknown> = {}): void {
+  if (!res.headersSent) res.setHeader('Connection', 'close')
+  res.status(status).json({ reason, ...extra })
 }
 
 /**
@@ -305,7 +324,7 @@ app.post('/:shareType(share|s)/:key/upload', decodeCookie, asyncHandler(async (r
 
   if (uploadsInFlight >= UPLOAD_MAX_CONCURRENT) {
     res.setHeader('Connection', 'close')
-    res.status(503).set('Retry-After', '5').json({ error: 'busy' })
+    res.status(503).set('Retry-After', '5').json({ reason: 'busy' })
     return
   }
 
@@ -331,21 +350,25 @@ async function handleUpload (req: Request, res: Response, keyType: KeyType, abor
     failUpload(res, resolved.status, resolved.reason)
     return
   }
-  if (!canUpload(resolved.link)) {
-    // Deliberately the same generic response as an unknown share: an
-    // upload-disabled link should not be distinguishable from a bad key.
-    failUpload(res, 404, 'Uploads not enabled for this share')
+  const refusal = uploadRefusal(resolved.link)
+  if (refusal) {
+    // 403, not 404: the share resolved, so this is "you may not", not "no
+    // such thing". `album-full` and `expired` in particular are states a
+    // legitimate visitor reaches mid-session.
+    refuseUpload(res, 403, refusal, {
+      maxAssets: getNumericConfigOption('ipp.upload.maxAssets', 500)
+    })
     return
   }
 
   const contentType = String(req.headers['content-type'] || '')
   if (!/^(image|video)\//.test(contentType)) {
-    failUpload(res, 400, 'Unsupported upload content type')
+    refuseUpload(res, 400, 'not-media')
     return
   }
   const createdAt = parseCreatedAt(req.headers['x-ipp-created-at'])
   if (!createdAt) {
-    failUpload(res, 400, 'Missing or invalid X-IPP-Created-At')
+    refuseUpload(res, 400, 'bad-date')
     return
   }
 
@@ -354,7 +377,7 @@ async function handleUpload (req: Request, res: Response, keyType: KeyType, abor
   // stream/upload.ts, because a chunked request carries no Content-Length.
   const declared = Number(req.headers['content-length'] || 0)
   if (declared && declared > maxBytes) {
-    failUpload(res, 413, 'Upload too large')
+    refuseUpload(res, 413, 'too-large', { maxBytes })
     return
   }
 
@@ -386,7 +409,9 @@ async function handleUpload (req: Request, res: Response, keyType: KeyType, abor
     const status = outcome.reason === 'too-large'
       ? 413
       : (outcome.reason === 'empty' || outcome.reason === 'not-media') ? 400 : 502
-    failUpload(res, status, 'Upload failed: ' + outcome.reason)
+    refuseUpload(res, status, outcome.reason === 'rejected' || outcome.reason === 'error'
+      ? 'upstream'
+      : outcome.reason, { maxBytes })
     return
   }
 

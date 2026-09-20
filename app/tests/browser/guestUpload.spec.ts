@@ -120,7 +120,32 @@ test.describe('guest upload in the browser', () => {
       { name: 'not-really.png', mimeType: 'image/png', buffer: Buffer.from('PK' + 'A'.repeat(64), 'latin1') }
     ])
 
-    await expect(page.locator('#upload-status')).toContainText(/failed/i, { timeout: 30000 })
+    // The message must name the file and the reason, not just say "failed":
+    // those are different next steps for the visitor.
+    await expect(page.locator('#upload-status'))
+      .toContainText(/not-really\.png is not a photo or video/i, { timeout: 30000 })
+    expect((await fx.albumAssetIds(albumId)).length).toBe(before)
+  })
+
+  test('rejects an oversize file without uploading it', async ({ page }) => {
+    // Caught in the browser from the size the file input reports, so nothing
+    // is sent. On a phone connection, uploading and THEN being told is the
+    // difference between an inconvenience and giving up.
+    await page.goto(`${cfg!.ippUrl}/share/${uploadKey}`)
+    const before = (await fx.albumAssetIds(albumId)).length
+
+    const requests: string[] = []
+    page.on('request', r => { if (r.url().includes('/upload')) requests.push(r.url()) })
+
+    const chooser = page.waitForEvent('filechooser')
+    await page.getByRole('button', { name: 'Add photos' }).click()
+    await (await chooser).setFiles([
+      { name: 'huge.png', mimeType: 'image/png', buffer: Buffer.alloc(3 * 1024 * 1024, 7) }
+    ])
+
+    await expect(page.locator('#upload-status'))
+      .toContainText(/huge\.png is larger than/i, { timeout: 30000 })
+    expect(requests).toHaveLength(0)
     expect((await fx.albumAssetIds(albumId)).length).toBe(before)
   })
 

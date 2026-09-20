@@ -34,61 +34,79 @@ export function canDownload (share: SharedLink): boolean {
 }
 
 /**
- * Decide whether visitors may upload into this share's album.
+ * Why an upload into this share would be refused, or null if it would not.
  *
- * Several independent conditions, and every one of them must hold. They are
- * not redundant: each closes a different way an upload link goes wrong once
- * it is out of your hands.
+ * Every condition must hold. They are not redundant - each closes a different
+ * way an upload link goes wrong once it is out of your hands. A share key is a
+ * capability, not an identity: it travels in URLs, browser history, group
+ * chats and screenshots, and anyone holding it can write.
  *
- * A share key is a capability, not an identity. It travels in URLs, browser
- * history, group chats and screenshots, and anyone holding it can write. The
- * conditions below exist to bound what that costs you when - not if - one
- * ends up somewhere you did not intend.
+ * Returning a reason rather than a boolean is a UX decision. The gallery only
+ * shows the upload control when uploads are possible, so most of these are
+ * invisible - but `album-full` and `expired` are states a legitimate visitor
+ * reaches mid-session, and "Upload failed" is a poor way to learn that the
+ * album filled up while you were choosing photos.
  */
-export function canUpload (share: SharedLink): boolean {
-  // 1. The operator opted the instance in. Default false: a stock deployment
-  //    of this fork behaves exactly like upstream.
-  if (!getConfigOption('ipp.upload.enabled', false)) return false
+// disabled       operator has not opted this instance in
+// not-allowed    owner did not enable uploads on this link
+// not-album      individual share; nothing to file an upload into
+// slug           readable key, refused for writes by policy
+// no-password    operator requires password-protected links
+// no-expiry      link never expires
+// expired        link has expired
+// expiry-too-far expiry beyond the configured horizon
+// album-full     cumulative ceiling reached
+export type UploadRefusal =
+  | 'disabled'
+  | 'not-allowed'
+  | 'not-album'
+  | 'slug'
+  | 'no-password'
+  | 'no-expiry'
+  | 'expired'
+  | 'expiry-too-far'
+  | 'album-full'
 
-  // 2. The share owner enabled uploads on this specific link, in Immich.
-  //    Immich enforces this too (401 at POST /assets), so this is the UI gate
-  //    plus defence in depth, never the only thing in the way.
-  if (!share.allowUpload) return false
+export function uploadRefusal (share: SharedLink): UploadRefusal | null {
+  if (!getConfigOption('ipp.upload.enabled', false)) return 'disabled'
+  if (!share.allowUpload) return 'not-allowed'
+  if (share.type !== AlbumType.album) return 'not-album'
 
-  // 3. Album shares only. Our restriction, not Immich's - it would happily
-  //    append to an individual share's asset list, but a hand-picked set of
-  //    photos is rarely something the owner meant to let others extend.
-  if (share.type !== AlbumType.album) return false
-
-  // 4. Random key only, never a slug. A slug is chosen to be readable and
-  //    therefore guessable (`holiday-2026`); the generated key is 60-odd
-  //    characters of entropy. Both are fine for reading, only one is a
-  //    credential worth writing with. Slug links keep working - they just
-  //    show no upload control.
+  // A slug is chosen to be readable and is therefore guessable
+  // (`holiday-2026`); the generated key is sixty-odd characters of entropy.
+  // Both are fine for reading, only one is worth writing with.
   if (getConfigOption('ipp.upload.requireRandomKey', true) && share.keyType === KeyType.slug) {
-    return false
+    return 'slug'
   }
 
-  // 5. The link must expire, and not in a geological timeframe. An upload
-  //    capability with no end date is one you can never fully retract, since
-  //    you cannot know who copied the URL. The horizon caps the blast radius
-  //    of a leak at a known number of days.
+  // Off by default: a password turns the link from a pure capability into
+  // something that has to travel in two pieces.
+  if (getConfigOption('ipp.upload.requirePassword', false) && !share.password) {
+    return 'no-password'
+  }
+
+  // An upload capability with no end date cannot be retracted, because you
+  // cannot know who copied the URL. The horizon caps a leak at known days.
   if (getConfigOption('ipp.upload.requireExpiry', true)) {
-    if (!share.expiresAt) return false
+    if (!share.expiresAt) return 'no-expiry'
     const expires = dayjs(share.expiresAt)
-    if (!expires.isValid() || expires.isBefore(dayjs())) return false
+    if (!expires.isValid() || expires.isBefore(dayjs())) return 'expired'
     const maxDays = getNumericConfigOption('ipp.upload.maxExpiryDays', 30)
-    if (maxDays > 0 && expires.isAfter(dayjs().add(maxDays, 'day'))) return false
+    if (maxDays > 0 && expires.isAfter(dayjs().add(maxDays, 'day'))) return 'expiry-too-far'
   }
 
-  // 6. Cumulative ceiling. The per-file size cap bounds ONE upload; nothing
-  //    bounds how many. Without this, a leaked link is limited only by your
-  //    free disk. Counting the album's own assets keeps that stateless - IPP
-  //    stores nothing, and the count is refreshed on every successful upload.
+  // The only cumulative limit. maxFileSizeMb bounds ONE file; without this a
+  // leaked link is limited only by free disk. Counting the album's own assets
+  // keeps it stateless - the count refreshes on every successful upload.
   const maxAssets = getNumericConfigOption('ipp.upload.maxAssets', 500)
-  if (maxAssets > 0 && share.assets.length >= maxAssets) return false
+  if (maxAssets > 0 && share.assets.length >= maxAssets) return 'album-full'
 
-  return true
+  return null
+}
+
+/** UI gate: show the upload control only when an upload would be accepted. */
+export function canUpload (share: SharedLink): boolean {
+  return uploadRefusal(share) === null
 }
 
 const DEFAULT_EXPIRY_FORMAT = 'YYYY-MM-DD'

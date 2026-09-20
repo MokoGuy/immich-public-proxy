@@ -18,6 +18,7 @@ different way an upload link goes wrong once it is out of your hands.
 | "Allow uploads" on the link | Immich share settings | off |
 | Album share, not individual | — | always |
 | Random key, not a slug | `ipp.upload.requireRandomKey` | `true` |
+| Password set on the link | `ipp.upload.requirePassword` | `false` |
 | Has an expiry, still in the future | `ipp.upload.requireExpiry` | `true` |
 | Expiry within the horizon | `ipp.upload.maxExpiryDays` | `30` |
 | Album below its ceiling | `ipp.upload.maxAssets` | `500` |
@@ -70,6 +71,7 @@ letting a visitor append to it is rarely what the owner meant.
 | `maxFileSizeMb` | `200` | Per-file ceiling, counted while streaming — a chunked request carries no `Content-Length`, so the declared size is only a cheap pre-check. |
 | `maxConcurrent` | `2` | Uploads relayed to Immich at once, across all visitors. |
 | `requireRandomKey` | `true` | Refuse `/s/<slug>` for writes. |
+| `requirePassword` | `false` | Refuse links with no password. Off by default. |
 | `requireExpiry` | `true` | Refuse links with no expiry, or already expired. |
 | `maxExpiryDays` | `30` | Refuse links expiring further out than this. `0` disables. |
 | `maxAssets` | `500` | Refuse once the album holds this many. `0` disables. |
@@ -251,6 +253,38 @@ to break on an Immich upgrade:
 
 Running an ephemeral Immich pinned to one version would make these break
 loudly and on purpose rather than silently in production — see below.
+
+## What a visitor is told when an upload fails
+
+"Upload failed" is useless: retrying, picking a smaller file and asking the
+album owner are three different next steps. So failures name the file and the
+cause.
+
+**Two kinds of failure, answered differently on purpose.** A share that does
+not resolve — wrong key, missing password — gets the generic empty response,
+so probing for valid links learns nothing. Once a share *has* resolved, the
+visitor demonstrably holds a working link and can already see the gallery;
+telling them why the upload was refused leaks nothing new.
+
+| Situation | Status | What the visitor reads |
+|---|---|---|
+| Unknown key | `404`, empty | (the gallery never loaded) |
+| Uploads not enabled on the link | `403 not-allowed` | This link no longer accepts uploads |
+| Link expired | `403 expired` | This link has expired |
+| Album at its ceiling | `403 album-full` | The album is full — ask whoever shared it to make room |
+| File over the size cap | `413 too-large` | `beach.mp4` is larger than 200 MB |
+| Not actually a photo/video | `400 not-media` | `notes.png` is not a photo or video |
+| Empty file | `400 empty` | `x.jpg` is empty |
+| Too many at once | `503 busy` | Too many uploads at once — try again in a few seconds |
+| Immich refused it | `502 upstream` | The photo server would not accept `x.jpg` |
+
+Size and emptiness are caught **in the browser, before a byte is sent**.
+Uploading 300 MB over a phone connection and only then being told it was too
+big is the kind of thing that makes people give up.
+
+Multi-file selections report per file — `Added 3. Not added: beach.mp4 is
+larger than 200 MB` — rather than a bare count, capped at three reasons before
+it falls back to "and N more".
 
 ## Licence obligation (AGPL-3.0 section 13)
 

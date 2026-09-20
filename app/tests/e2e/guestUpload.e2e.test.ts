@@ -151,8 +151,11 @@ run('guest upload against a live Immich', () => {
         filename: 'nope.png',
         createdAt: CREATED_AT
       })
-      // Indistinguishable from an unknown share: no oracle for probing.
-      expect(res.status).toBe(404)
+      // 403 with a reason, not a silent 404: the share resolved, so the
+      // visitor holds a working link and deserves to know why. An UNKNOWN key
+      // still gets the generic response - see the test below.
+      expect(res.status).toBe(403)
+      expect((await res.json() as { reason: string }).reason).toBe('not-allowed')
       expect(await fx.albumAssetIds(albumId)).not.toContain('nope')
     }, 60000)
 
@@ -173,11 +176,22 @@ run('guest upload against a live Immich', () => {
       })).status).toBe(400)
     }, 30000)
 
-    it('refuses an unknown share key', async () => {
+    it('stays generic for an unknown share key', async () => {
+      // This is the one that must NOT be informative: probing for valid links
+      // should learn nothing. Empty body, same 404 as any bad path.
       const res = await uploadToIpp(c, '/share/thiskeydoesnotexist', makePng(20, 20), {
         filename: 'a.png', createdAt: CREATED_AT
       })
       expect(res.status).toBe(404)
+      expect(await res.text()).toBe('')
+    }, 30000)
+
+    it('names the reason for a too-large file so the client can say so', async () => {
+      const res = await uploadToIpp(c, `/share/${uploadKey}`, Buffer.from('PK' + 'A'.repeat(64), 'latin1'), {
+        filename: 'x.png', contentType: 'image/png', createdAt: CREATED_AT
+      })
+      expect(res.status).toBe(400)
+      expect((await res.json() as { reason: string }).reason).toBe('not-media')
     }, 30000)
   })
 
@@ -275,7 +289,8 @@ run('guest upload against a live Immich', () => {
       const res = await uploadToIpp(c, `/share/${link.key}`, makePng(20, 20), {
         filename: 'forever.png', createdAt: CREATED_AT
       })
-      expect(res.status).toBe(404)
+      expect(res.status).toBe(403)
+      expect((await res.json() as { reason: string }).reason).toBe('no-expiry')
     }, 60000)
 
     it('refuses an expiry beyond the configured horizon', async () => {
@@ -283,7 +298,8 @@ run('guest upload against a live Immich', () => {
       const res = await uploadToIpp(c, `/share/${link.key}`, makePng(20, 20), {
         filename: 'too-far.png', createdAt: CREATED_AT
       })
-      expect(res.status).toBe(404)
+      expect(res.status).toBe(403)
+      expect((await res.json() as { reason: string }).reason).toBe('expiry-too-far')
     }, 60000)
 
     it('refuses a slug link even when the same album accepts the random key', async () => {
@@ -297,7 +313,8 @@ run('guest upload against a live Immich', () => {
       const viaSlug = await uploadToIpp(c, `/s/${slug}`, makePng(20, 20), {
         filename: 'via-slug.png', createdAt: CREATED_AT
       })
-      expect(viaSlug.status).toBe(404)
+      expect(viaSlug.status).toBe(403)
+      expect((await viaSlug.json() as { reason: string }).reason).toBe('slug')
 
       const viaKey = await uploadToIpp(c, `/share/${link.key}`, makePng(25, 25, false, 71), {
         filename: 'via-key.png', createdAt: CREATED_AT
