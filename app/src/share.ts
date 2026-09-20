@@ -1,5 +1,5 @@
-import { AlbumType, DownloadAll, SharedLink } from './types'
-import { getConfigOption } from './config/access'
+import { AlbumType, DownloadAll, KeyType, SharedLink } from './types'
+import { getConfigOption, getNumericConfigOption } from './config/access'
 import dayjs from 'dayjs'
 
 /**
@@ -36,27 +36,59 @@ export function canDownload (share: SharedLink): boolean {
 /**
  * Decide whether visitors may upload into this share's album.
  *
- * Two independent gates must both be open, and neither is sufficient alone:
- *   1. `ipp.upload.enabled` - the operator opts the whole instance in. Default
- *      `false`, so a stock deployment stays read-only exactly as before.
- *   2. `share.allowUpload` - the share owner enabled "Allow uploads" on this
- *      specific link in Immich.
+ * Several independent conditions, and every one of them must hold. They are
+ * not redundant: each closes a different way an upload link goes wrong once
+ * it is out of your hands.
  *
- * Gate 2 is also enforced by Immich itself: a shared-link key for a link
- * without `allowUpload` is rejected at `POST /assets` with 401. This check is
- * therefore a UI gate plus defence in depth, never the only thing standing
- * between a visitor and a write.
- *
- * Uploads are restricted to album shares. This is OUR restriction, not an
- * Immich limitation - Immich will happily attach an upload to an individual
- * share's asset list. An individual share is a hand-picked set of photos,
- * where letting a visitor append to it is rarely what the owner meant, so the
- * fork keeps the feature to the case it was built for.
+ * A share key is a capability, not an identity. It travels in URLs, browser
+ * history, group chats and screenshots, and anyone holding it can write. The
+ * conditions below exist to bound what that costs you when - not if - one
+ * ends up somewhere you did not intend.
  */
 export function canUpload (share: SharedLink): boolean {
+  // 1. The operator opted the instance in. Default false: a stock deployment
+  //    of this fork behaves exactly like upstream.
   if (!getConfigOption('ipp.upload.enabled', false)) return false
+
+  // 2. The share owner enabled uploads on this specific link, in Immich.
+  //    Immich enforces this too (401 at POST /assets), so this is the UI gate
+  //    plus defence in depth, never the only thing in the way.
+  if (!share.allowUpload) return false
+
+  // 3. Album shares only. Our restriction, not Immich's - it would happily
+  //    append to an individual share's asset list, but a hand-picked set of
+  //    photos is rarely something the owner meant to let others extend.
   if (share.type !== AlbumType.album) return false
-  return !!share.allowUpload
+
+  // 4. Random key only, never a slug. A slug is chosen to be readable and
+  //    therefore guessable (`holiday-2026`); the generated key is 60-odd
+  //    characters of entropy. Both are fine for reading, only one is a
+  //    credential worth writing with. Slug links keep working - they just
+  //    show no upload control.
+  if (getConfigOption('ipp.upload.requireRandomKey', true) && share.keyType === KeyType.slug) {
+    return false
+  }
+
+  // 5. The link must expire, and not in a geological timeframe. An upload
+  //    capability with no end date is one you can never fully retract, since
+  //    you cannot know who copied the URL. The horizon caps the blast radius
+  //    of a leak at a known number of days.
+  if (getConfigOption('ipp.upload.requireExpiry', true)) {
+    if (!share.expiresAt) return false
+    const expires = dayjs(share.expiresAt)
+    if (!expires.isValid() || expires.isBefore(dayjs())) return false
+    const maxDays = getNumericConfigOption('ipp.upload.maxExpiryDays', 30)
+    if (maxDays > 0 && expires.isAfter(dayjs().add(maxDays, 'day'))) return false
+  }
+
+  // 6. Cumulative ceiling. The per-file size cap bounds ONE upload; nothing
+  //    bounds how many. Without this, a leaked link is limited only by your
+  //    free disk. Counting the album's own assets keeps that stateless - IPP
+  //    stores nothing, and the count is refreshed on every successful upload.
+  const maxAssets = getNumericConfigOption('ipp.upload.maxAssets', 500)
+  if (maxAssets > 0 && share.assets.length >= maxAssets) return false
+
+  return true
 }
 
 const DEFAULT_EXPIRY_FORMAT = 'YYYY-MM-DD'

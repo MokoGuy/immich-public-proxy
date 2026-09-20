@@ -8,10 +8,15 @@
     "maxZoomQuality": "preview",
     "downloadedFilename": 0,
     "allowDownload": 0,
+    "sourceUrl": "https://github.com/MokoGuy/immich-public-proxy",
     "upload": {
       "enabled": false,
       "maxFileSizeMb": 200,
-      "maxConcurrent": 2
+      "maxConcurrent": 2,
+      "requireRandomKey": true,
+      "requireExpiry": true,
+      "maxExpiryDays": 30,
+      "maxAssets": 500
     },
     "allowSlugLinks": true,
     "showHomePage": true,

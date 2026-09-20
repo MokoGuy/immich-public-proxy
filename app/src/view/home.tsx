@@ -1,3 +1,5 @@
+import { SourceFooter } from './source-footer'
+
 export function Home () {
   return (
     <html lang="en">
@@ -22,6 +24,22 @@ export function Home () {
               height: 280px;
               opacity: 0.3;
             }
+            /* The section 13 offer must stay visible on this page too. */
+            #source-offer {
+              position: fixed;
+              bottom: 0;
+              width: 100%;
+              padding: 1rem;
+              text-align: center;
+              font-size: 0.8rem;
+            }
+            #source-offer a {
+              color: #fff;
+              opacity: 0.4;
+              text-decoration: none;
+              border-bottom: 1px dotted currentColor;
+            }
+            #source-offer a:hover { opacity: 0.9; }
           `
         }}/>
       </head>
@@ -31,6 +49,7 @@ export function Home () {
             <img src="/share/static/images/ipp.svg" alt=""/>
           </a>
         </div>
+        <SourceFooter/>
       </body>
     </html>
   )

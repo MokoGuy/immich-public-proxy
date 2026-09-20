@@ -1,3 +1,4 @@
+import { SourceFooter } from './source-footer'
 interface PasswordProps {
   shareKey: string
   notifyInvalidPassword: boolean
@@ -66,6 +67,7 @@ export function Password ({ shareKey, notifyInvalidPassword }: PasswordProps) {
           </div>
         </main>
         <script dangerouslySetInnerHTML={{ __html: submitScript }}/>
+        <SourceFooter/>
       </body>
     </html>
   )

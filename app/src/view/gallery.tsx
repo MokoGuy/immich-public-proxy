@@ -2,6 +2,7 @@ import { AssetType } from '../types'
 import { ThemeScript } from './theme'
 import { GalleryItem, LightboxConfig, MetadataConfig, GroupByDateMode } from '../shared/types'
 import { ASSET_VERSION } from '../version'
+import { SourceFooter } from './source-footer'
 import { jsonForInlineScript } from '../utils/text'
 
 export type { GalleryItem, LightboxConfig, MetadataConfig, GroupByDateMode }
@@ -142,6 +143,7 @@ export function Gallery (props: GalleryProps) {
           dangerouslySetInnerHTML={{ __html: initJson }}
         />
         <script type="module" src={`/share/static/${ASSET_VERSION}/js/client/init.js`}></script>
+        <SourceFooter/>
       </body>
     </html>
   )

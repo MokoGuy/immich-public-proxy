@@ -84,17 +84,28 @@ export class ImmichFixtures {
     return album.id
   }
 
+  /**
+   * Upload-enabled links get an expiry by default, because the fork refuses
+   * to write through a link that has none (see ipp.upload.requireExpiry).
+   * Pass `expiresInDays` to exercise the horizon, or `null` to omit it.
+   */
   async createShareLink (albumId: string, opts: {
     allowUpload?: boolean
     password?: string
     slug?: string
+    expiresInDays?: number | null
   } = {}): Promise<{ id: string, key: string, slug: string | null }> {
+    const days = opts.expiresInDays === undefined ? 7 : opts.expiresInDays
+    const expiresAt = days === null
+      ? undefined
+      : new Date(Date.now() + days * 86400_000).toISOString()
     const link = await this.json<{ id: string, key: string, slug: string | null }>('/shared-links', {
       method: 'POST',
       body: JSON.stringify({
         type: 'ALBUM',
         albumId,
         allowUpload: opts.allowUpload ?? false,
+        ...(expiresAt ? { expiresAt } : {}),
         ...(opts.password ? { password: opts.password } : {}),
         ...(opts.slug ? { slug: opts.slug } : {})
       })

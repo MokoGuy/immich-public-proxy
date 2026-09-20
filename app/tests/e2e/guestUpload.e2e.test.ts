@@ -267,8 +267,64 @@ run('guest upload against a live Immich', () => {
     }, 120000)
   })
 
+  describe('write restrictions', () => {
+    it('refuses a link with no expiry', async () => {
+      // An upload capability with no end date cannot be retracted: you do not
+      // know who copied the URL.
+      const link = await fx.createShareLink(albumId, { allowUpload: true, expiresInDays: null })
+      const res = await uploadToIpp(c, `/share/${link.key}`, makePng(20, 20), {
+        filename: 'forever.png', createdAt: CREATED_AT
+      })
+      expect(res.status).toBe(404)
+    }, 60000)
+
+    it('refuses an expiry beyond the configured horizon', async () => {
+      const link = await fx.createShareLink(albumId, { allowUpload: true, expiresInDays: 400 })
+      const res = await uploadToIpp(c, `/share/${link.key}`, makePng(20, 20), {
+        filename: 'too-far.png', createdAt: CREATED_AT
+      })
+      expect(res.status).toBe(404)
+    }, 60000)
+
+    it('refuses a slug link even when the same album accepts the random key', async () => {
+      // Readable means guessable. The slug still serves the gallery; it just
+      // carries no upload capability.
+      const slug = `zz-ipp-e2e-write-${Date.now()}`
+      const link = await fx.createShareLink(albumId, { allowUpload: true, slug })
+      expect(link.slug).toBe(slug)
+
+      expect((await fetch(`${c.ippUrl}/s/${slug}`)).status).toBe(200)
+      const viaSlug = await uploadToIpp(c, `/s/${slug}`, makePng(20, 20), {
+        filename: 'via-slug.png', createdAt: CREATED_AT
+      })
+      expect(viaSlug.status).toBe(404)
+
+      const viaKey = await uploadToIpp(c, `/share/${link.key}`, makePng(25, 25, false, 71), {
+        filename: 'via-key.png', createdAt: CREATED_AT
+      })
+      expect(viaKey.status).toBe(200)
+      fx.track((await viaKey.json() as { id: string }).id)
+    }, 90000)
+
+    it('hides the upload control on a slug gallery', async () => {
+      const slug = `zz-ipp-e2e-ui-${Date.now()}`
+      const link = await fx.createShareLink(albumId, { allowUpload: true, slug })
+      expect(link.slug).toBe(slug)
+      const page = await (await fetch(`${c.ippUrl}/s/${slug}`)).text()
+      expect(page).not.toContain('upload-open')
+    }, 60000)
+  })
+
+  describe('AGPL section 13', () => {
+    it('offers the source from the gallery itself', async () => {
+      const page = await (await fetch(`${c.ippUrl}/share/${uploadKey}`)).text()
+      expect(page).toContain('source-offer')
+      expect(page).toMatch(/href="https?:\/\/[^"]+"[^>]*>Source/)
+    }, 30000)
+  })
+
   describe('slug shares', () => {
-    it('uploads through /s/<slug> and keeps the canonical-key view fresh', async () => {
+    it('serves a slug gallery and keeps the canonical-key view fresh', async () => {
       const slug = `${'zz-ipp-e2e'}-${Date.now()}`
       const link = await fx.createShareLink(albumId, { allowUpload: true, slug })
       // Assert the fixture, do not tiptoe around it: returning early here
@@ -282,8 +338,9 @@ run('guest upload against a live Immich', () => {
       expect((await fetch(`${c.ippUrl}/s/${slug}`)).status).toBe(200)
       expect((await fetch(`${c.ippUrl}/share/${link.key}`)).status).toBe(200)
 
-      const res = await uploadToIpp(c, `/s/${slug}`, makePng(70, 50, false, 31), {
-        filename: 'via-slug.png', createdAt: CREATED_AT
+      // Upload through the random key - the slug is read-only by policy.
+      const res = await uploadToIpp(c, `/share/${link.key}`, makePng(70, 50, false, 31), {
+        filename: 'slug-album.png', createdAt: CREATED_AT
       })
       expect(res.status).toBe(200)
       const { id } = await res.json() as { id: string }

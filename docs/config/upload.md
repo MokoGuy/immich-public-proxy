@@ -7,12 +7,37 @@
 Lets visitors add photos and videos to a shared album from the gallery page,
 with no Immich account.
 
-## Two gates, both required
+## What a link must satisfy
 
-| Gate | Where | Default |
+Every condition below must hold. They are not redundant — each closes a
+different way an upload link goes wrong once it is out of your hands.
+
+| Condition | Where | Default |
 |---|---|---|
 | `ipp.upload.enabled` | IPP `config.json` | `false` |
 | "Allow uploads" on the link | Immich share settings | off |
+| Album share, not individual | — | always |
+| Random key, not a slug | `ipp.upload.requireRandomKey` | `true` |
+| Has an expiry, still in the future | `ipp.upload.requireExpiry` | `true` |
+| Expiry within the horizon | `ipp.upload.maxExpiryDays` | `30` |
+| Album below its ceiling | `ipp.upload.maxAssets` | `500` |
+
+A share key is a **capability, not an identity**. It travels in URLs, browser
+history, group chats and screenshots, and anyone holding it can write. These
+conditions bound what that costs you when — not if — one ends up somewhere you
+did not intend.
+
+**Slugs are readable and therefore guessable** (`holiday-2026`); the generated
+key is sixty-odd characters of entropy. Both are fine for reading, only one is
+worth writing with. A slug link keeps serving its gallery — it just shows no
+upload control.
+
+**The ceiling is the only cumulative limit.** `maxFileSizeMb` bounds one file;
+nothing else bounds how many. Without `maxAssets`, a leaked link is limited
+only by your free disk. Counting the album's own assets keeps this stateless:
+IPP stores nothing, and the count refreshes on every successful upload.
+
+Set `maxExpiryDays` or `maxAssets` to `0` to disable that particular ceiling.
 
 A stock deployment of this fork behaves exactly like upstream until the
 operator flips `ipp.upload.enabled`. Immich independently enforces the
@@ -44,6 +69,28 @@ letting a visitor append to it is rarely what the owner meant.
 | `enabled` | `false` | Instance-wide opt-in. |
 | `maxFileSizeMb` | `200` | Per-file ceiling, counted while streaming — a chunked request carries no `Content-Length`, so the declared size is only a cheap pre-check. |
 | `maxConcurrent` | `2` | Uploads relayed to Immich at once, across all visitors. |
+| `requireRandomKey` | `true` | Refuse `/s/<slug>` for writes. |
+| `requireExpiry` | `true` | Refuse links with no expiry, or already expired. |
+| `maxExpiryDays` | `30` | Refuse links expiring further out than this. `0` disables. |
+| `maxAssets` | `500` | Refuse once the album holds this many. `0` disables. |
+
+### Choosing `maxFileSizeMb`
+
+Measured against a real 54 000-photo library: photos sit at a 2.3 MB median,
+5.7 MB at p95, 8.8 MB at p99 — **99.9 % under 25 MB**. Videos are a different
+population entirely: 21 MB median, 210 MB at p95, up to multiple gigabytes.
+
+So the number encodes a policy, not a technical limit:
+
+- **25 MB** covers every photo including 48 MP RAW, and structurally excludes
+  video (a clip that small is a few seconds of 1080p).
+- **200 MB** — the default — covers photos plus the short clips people
+  actually send. This is the right choice if you expect videos.
+- Beyond that you are mostly widening the worst case for no practical gain.
+
+Pair it with `maxAssets`: at 200 MB and a 500-asset ceiling, a leaked link
+costs at most ~100 GB before it stops accepting anything, and expires by
+itself within `maxExpiryDays`.
 
 ## How it works
 
@@ -204,6 +251,19 @@ to break on an Immich upgrade:
 
 Running an ephemeral Immich pinned to one version would make these break
 loudly and on purpose rather than silently in production — see below.
+
+## Licence obligation (AGPL-3.0 section 13)
+
+Running a modified version that people reach over a network triggers section
+13: those users must be offered the Corresponding Source, prominently, **for
+the version actually running** — a public repository alone does not discharge
+it.
+
+Every page a visitor can land on therefore carries a `Source (<revision>)`
+footer link. The revision comes from `APP_VERSION`, baked in at image build
+time, so the link points at the exact commit serving the request. Set
+`ipp.sourceUrl` if you fork this fork, so it offers your source rather than
+someone else's.
 
 ## Reverse proxies: a deployment note
 

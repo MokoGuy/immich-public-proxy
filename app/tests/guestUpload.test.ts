@@ -2,6 +2,7 @@ import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest'
 import { Readable } from 'stream'
 import { ensureExtension, sanitiseFilename, uploadAsset } from '../src/stream/upload'
 import { canUpload } from '../src/share'
+import { sourceLabel, sourceUrl } from '../src/source'
 import { AlbumType, KeyType, SharedLink } from '../src/types'
 import { loadConfig } from '../src/config/loader'
 
@@ -11,16 +12,20 @@ afterEach(() => {
   vi.unstubAllGlobals()
 })
 
+/** A share that satisfies every condition, so each test can break exactly one. */
 function share (over: Partial<SharedLink> = {}): SharedLink {
   return {
     key: 'canonical',
     keyType: KeyType.key,
     type: AlbumType.album,
     assets: [],
-    expiresAt: null,
+    allowUpload: true,
+    expiresAt: new Date(Date.now() + 7 * 86400_000).toISOString(),
     ...over
   } as SharedLink
 }
+
+const inDays = (n: number) => new Date(Date.now() + n * 86400_000).toISOString()
 
 /**
  * Capture what uploadAsset puts on the wire.
@@ -81,9 +86,9 @@ function request (over: Record<string, unknown> = {}) {
   } as Parameters<typeof uploadAsset>[0]
 }
 
-/** Load a config with uploads switched on at the instance level. */
-function withUploadsEnabled (): void {
-  process.env.CONFIG = JSON.stringify({ ipp: { upload: { enabled: true } } })
+/** Load a config with uploads on, plus any per-test overrides. */
+function withUploadsEnabled (over: Record<string, unknown> = {}): void {
+  process.env.CONFIG = JSON.stringify({ ipp: { upload: { enabled: true, ...over } } })
   loadConfig()
 }
 
@@ -100,23 +105,97 @@ describe('canUpload gating', () => {
 
   it('is closed by default even when Immich allows upload', () => {
     // ipp.upload.enabled defaults to false: a stock deploy stays read-only.
-    expect(canUpload(share({ allowUpload: true }))).toBe(false)
+    expect(canUpload(share())).toBe(false)
   })
 
   it('stays closed for a link without allowUpload once the instance opts in', () => {
     withUploadsEnabled()
     expect(canUpload(share({ allowUpload: false }))).toBe(false)
-    expect(canUpload(share({}))).toBe(false)
+    expect(canUpload(share({ allowUpload: undefined }))).toBe(false)
   })
 
-  it('opens only when both gates are open', () => {
+  it('opens when every condition holds', () => {
     withUploadsEnabled()
-    expect(canUpload(share({ allowUpload: true }))).toBe(true)
+    expect(canUpload(share())).toBe(true)
   })
 
-  it('refuses an individual share even with both gates open', () => {
+  it('refuses an individual share', () => {
     withUploadsEnabled()
-    expect(canUpload(share({ allowUpload: true, type: AlbumType.individual }))).toBe(false)
+    expect(canUpload(share({ type: AlbumType.individual }))).toBe(false)
+  })
+
+  it('refuses a slug link: readable means guessable', () => {
+    withUploadsEnabled()
+    expect(canUpload(share({ keyType: KeyType.slug }))).toBe(false)
+  })
+
+  it('allows a slug link when the operator turns that requirement off', () => {
+    withUploadsEnabled({ requireRandomKey: false })
+    expect(canUpload(share({ keyType: KeyType.slug }))).toBe(true)
+  })
+
+  it('refuses a link with no expiry', () => {
+    // An upload capability you cannot retract, because you cannot know who
+    // copied the URL.
+    withUploadsEnabled()
+    expect(canUpload(share({ expiresAt: null }))).toBe(false)
+  })
+
+  it('refuses an expiry beyond the configured horizon', () => {
+    withUploadsEnabled()
+    expect(canUpload(share({ expiresAt: inDays(31) }))).toBe(false)
+    expect(canUpload(share({ expiresAt: inDays(29) }))).toBe(true)
+  })
+
+  it('refuses an already-expired link', () => {
+    withUploadsEnabled()
+    expect(canUpload(share({ expiresAt: inDays(-1) }))).toBe(false)
+  })
+
+  it('honours a custom horizon, and 0 meaning no horizon', () => {
+    withUploadsEnabled({ maxExpiryDays: 90 })
+    expect(canUpload(share({ expiresAt: inDays(60) }))).toBe(true)
+    withUploadsEnabled({ maxExpiryDays: 0 })
+    expect(canUpload(share({ expiresAt: inDays(3650) }))).toBe(true)
+  })
+
+  it('refuses once the album has reached the cumulative ceiling', () => {
+    // The size cap bounds one file; this bounds the total. Without it a
+    // leaked link is limited only by free disk.
+    withUploadsEnabled({ maxAssets: 3 })
+    const assets = (n: number) => Array.from({ length: n }, (_, i) => ({ id: String(i) }))
+    expect(canUpload(share({ assets: assets(2) as never }))).toBe(true)
+    expect(canUpload(share({ assets: assets(3) as never }))).toBe(false)
+    expect(canUpload(share({ assets: assets(9) as never }))).toBe(false)
+  })
+
+  it('treats maxAssets 0 as no ceiling', () => {
+    withUploadsEnabled({ maxAssets: 0 })
+    const assets = Array.from({ length: 5000 }, (_, i) => ({ id: String(i) }))
+    expect(canUpload(share({ assets: assets as never }))).toBe(true)
+  })
+})
+
+describe('AGPL section 13 source offer', () => {
+  beforeEach(() => {
+    delete process.env.CONFIG
+    loadConfig()
+  })
+
+  it('points at the running revision, not at a moving branch', () => {
+    // Section 13 asks for the source of the version actually running.
+    expect(sourceUrl()).toContain('/tree/')
+  })
+
+  it('abbreviates a commit SHA in the label but keeps it in the href', () => {
+    expect(sourceLabel()).toMatch(/^Source( \(|$)/)
+  })
+
+  it('can be repointed so a fork of this fork offers its own source', () => {
+    process.env.CONFIG = JSON.stringify({ ipp: { sourceUrl: 'https://example.test/me/ipp/' } })
+    loadConfig()
+    expect(sourceUrl()).toContain('https://example.test/me/ipp/tree/')
+    expect(sourceUrl()).not.toContain('//tree')
   })
 })
 
