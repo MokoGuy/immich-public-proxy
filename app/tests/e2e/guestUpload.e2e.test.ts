@@ -14,6 +14,8 @@ environment contract; without it the whole file is skipped.
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import { createHash } from 'crypto'
 import net from 'net'
+import { execFile } from 'child_process'
+import { promisify } from 'util'
 import {
   E2EConfig,
   ImmichFixtures,
@@ -704,5 +706,56 @@ run('guest upload against a live Immich', () => {
         stalled.destroy()
       }
     }, 90000)
+  })
+
+  describe('operational reporting', () => {
+    /*
+     * The counters and levels are unit-tested; what this proves is the wiring:
+     * that a real upload through the real route reaches the real log. The
+     * summary is emitted on a fixed 60s cadence from server start, so a line
+     * must appear within one window of the upload.
+     */
+    const exec = promisify(execFile)
+    const CONTAINER = process.env.E2E_IPP_CONTAINER || 'ipp-test-stack-ipp-1'
+
+    const containerLog = async (): Promise<string | null> => {
+      try {
+        const { stdout, stderr } = await exec('docker', ['logs', CONTAINER])
+        return stdout + stderr
+      } catch (e) {
+        return null
+      }
+    }
+
+    it('records a successful upload in the proxy log', async () => {
+      const before = await containerLog()
+      if (before === null) {
+        // No docker here - say so rather than passing silently.
+        console.warn(`skipped: cannot read logs for container ${CONTAINER}`)
+        return
+      }
+      const baseline = before.split('\n').filter(l => l.includes('Guest upload |')).length
+
+      const res = await uploadToIpp(c, `/share/${uploadKey}`, makePng(30, 30, true, 77), {
+        filename: 'reported.png', createdAt: CREATED_AT
+      })
+      expect(res.status).toBe(200)
+      fx.track(((await res.json()) as { id: string }).id)
+
+      let line: string | undefined
+      const appeared = await eventually(async () => {
+        const now = await containerLog()
+        const lines = (now || '').split('\n').filter(l => l.includes('Guest upload |'))
+        if (lines.length <= baseline) return false
+        line = lines.slice(baseline).find(l => /created=[1-9]/.test(l))
+        return !!line
+      }, 90000, 2000)
+
+      expect(appeared, 'a successful upload still produced no log line').toBe(true)
+      expect(line).toMatch(/created=[1-9]/)
+      // Whatever else it says, it must not carry what the visitor sent.
+      expect(line).not.toContain('reported.png')
+      expect(line).not.toContain(uploadKey)
+    }, 120000)
   })
 })

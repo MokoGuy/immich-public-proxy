@@ -2,7 +2,6 @@ import { Readable } from 'stream'
 import { randomUUID } from 'crypto'
 import { apiUrl, authHeaders, buildUrl } from '../immich'
 import { KeyType } from '../types'
-import { log } from '../utils/log'
 
 /**
  * Streaming upload of a single asset into a shared album.
@@ -63,7 +62,7 @@ export type CheckResult =
 
 export type UploadOutcome =
   | { ok: true, id: string, status: string }
-  | { ok: false, reason: 'too-large' | 'aborted' | 'rejected' | 'error' | 'empty' | 'not-media' }
+  | { ok: false, reason: 'too-large' | 'aborted' | 'rejected' | 'transport' | 'error' | 'empty' | 'not-media' }
 
 /**
  * Why a flag and not `instanceof` on the caught error: fetch wraps anything
@@ -330,7 +329,9 @@ export async function uploadAsset (req: UploadRequest): Promise<UploadOutcome> {
       if (st.overflowed) return { ok: false, reason: 'too-large' }
       if (st.empty) return { ok: false, reason: 'empty' }
       if (st.notMedia) return { ok: false, reason: 'not-media' }
-      log.warn(`Immich rejected an upload with status ${res.status}`)
+      // Counted as `upstream-rejected` in the periodic summary rather than
+      // logged per request: an anonymous public endpoint must not be able to
+      // choose how many lines it writes.
       return { ok: false, reason: 'rejected' }
     }
     const body = await res.json() as { id?: string, status?: string }
@@ -343,8 +344,10 @@ export async function uploadAsset (req: UploadRequest): Promise<UploadOutcome> {
     if (st.empty || e instanceof UploadEmpty) return { ok: false, reason: 'empty' }
     if (st.notMedia || e instanceof UploadNotMedia) return { ok: false, reason: 'not-media' }
     if (isAbort(e)) return { ok: false, reason: 'aborted' }
-    log.warn(`Upload to Immich failed: ${e instanceof Error ? e.message : String(e)}`)
-    return { ok: false, reason: 'error' }
+    // Deliberately NOT logging `e.message`: fetch failures wrap upstream text,
+    // which can carry request values or a slice of Immich's response body. The
+    // summary counts this as `transport`, which is what an operator acts on.
+    return { ok: false, reason: 'transport' }
   } finally {
     // If Immich answered early (or we bailed out), the generator may still be
     // pulling from the visitor's socket. Destroy it so the slot and the
@@ -419,7 +422,6 @@ export async function checkDuplicate (req: {
     // A failed check is not a failed upload: the caller sends the file. But
     // it is not a MISS either, and conflating the two is how a pre-check
     // that has silently stopped working goes unnoticed for months.
-    noteUnavailable(e instanceof Error ? e.message : String(e))
     return { available: false }
   }
 }
@@ -432,22 +434,6 @@ export async function checkDuplicate (req: {
  * otherwise fill the log with one line per upload. Nothing visitor-supplied
  * is recorded: not the share key, not the checksum.
  */
-let lastUnavailableLog = 0
-let unavailableSince = 0
-let unavailableCount = 0
-
-function noteUnavailable (detail: string): void {
-  unavailableCount++
-  if (!unavailableSince) unavailableSince = Date.now()
-  const now = Date.now()
-  if (now - lastUnavailableLog < 60_000) return
-  lastUnavailableLog = now
-  const mins = Math.round((now - unavailableSince) / 60_000)
-  log.warn(
-    `Duplicate pre-check unavailable (${unavailableCount} time(s)` +
-    `${mins >= 1 ? `, for ${mins} min` : ''}); uploads continue without it. Last reason: ${detail}`
-  )
-}
 
 /** Visitor went away, or our own abort signal fired first. */
 function isAbort (e: unknown): boolean {

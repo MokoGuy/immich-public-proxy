@@ -80,6 +80,45 @@ letting a visitor append to it is rarely what the owner meant.
 | `maxExpiryDays` | `30` | Refuse links expiring further out than this. `0` disables. |
 | `maxAssets` | `500` | Refuse once the album holds this many. `0` disables. |
 
+### What the logs tell you
+
+The guest-upload routes report as an aggregate, one line per minute, and only
+when there is something to say:
+
+```
+Guest upload | upload: created=3 duplicate=1 too-large=1 | check: answered=4 | slots 1/2 oldest <1m
+```
+
+It is a `WARN` rather than an informational line when the summary contains a
+degraded outcome — `busy`, `upstream-rejected`, `invalid-response`,
+`transport`, `idle-timeout`, `deadline` or `unavailable`. A visitor sending the
+wrong sort of file is not a fault and stays informational.
+
+`slots` is reported even when no requests arrived. That is deliberate: a proxy
+whose admission slots are all held completes nothing and therefore generates no
+other output, so occupancy plus a climbing `oldest` bucket is the only thing
+that makes that state visible.
+
+**Nothing a visitor supplied is ever emitted** — no filenames, sizes, mime
+types, capture dates, checksums, share keys, addresses or upstream response
+text. Every token in the line comes from a closed vocabulary defined in
+`app/src/upload-log.ts`, so injection is structurally impossible rather than
+filtered out. In particular the filename is excluded even though
+`sanitiseFilename` has already stripped control characters: that protects the
+multipart IPP builds, not the log. Logs have different readers, exports and
+retention than Immich; bidi controls and U+2028/U+2029 survive sanitising; and
+a *refused* filename would create a record of material Immich never stored.
+
+There is deliberately no switch for any of this. An opt-in would recreate the
+blind spot it exists to close, and a "log everything" mode would break the
+privacy contract during exactly the incidents that tempt an operator to enable
+it.
+
+Two limits worth knowing. Counters count *requests*, not guests or photos: a
+retry counts twice, and a pre-check followed by an upload is two operations.
+And `created` means Immich accepted and stored the asset — not that its
+thumbnail is ready, nor that the visitor received the response.
+
 ### Why the slot bounds exist
 
 `maxConcurrent` is admission control, and the slot is released in a `finally`

@@ -23,6 +23,7 @@ import dayjs from 'dayjs'
 import { NextFunction, Request, Response } from 'express-serve-static-core'
 import { Asset, AssetType, ImageSize, KeyType, SharedLink } from './types'
 import { boundSlot } from './upload-slot'
+import { recordCheck, recordUpload, slotOpened, startUploadReporting } from './upload-log'
 import { getConfigOption, getNumericConfigOption } from './config/access'
 import { loadConfig } from './config/loader'
 import { addResponseHeaders, asyncHandler, errorHandler } from './http'
@@ -304,11 +305,16 @@ app.post('/:shareType(share|s)/:key/check', decodeCookie, asyncHandler(async (re
 
   const resolved = await resolveShare(req, keyType)
   if (!resolved.ok) {
+    recordCheck('unresolved-share')
     failUpload(res, resolved.status, resolved.reason)
     return
   }
   const refusal = uploadRefusal(resolved.link)
   if (refusal) {
+    // Recorded HERE rather than inside uploadRefusal: the gate is also
+    // consulted while rendering a gallery, so instrumenting it would report
+    // an upload refusal every time anyone merely looks at a read-only share.
+    recordCheck(refusal)
     refuseUpload(res, 403, refusal)
     return
   }
@@ -317,16 +323,19 @@ app.post('/:shareType(share|s)/:key/check', decodeCookie, asyncHandler(async (re
   // and has no business reaching Immich.
   const checksum = toString(req.headers['x-ipp-checksum'])
   if (!/^[A-Za-z0-9+/]{27}=$/.test(checksum)) {
+    recordCheck('bad-checksum')
     refuseUpload(res, 400, 'bad-checksum')
     return
   }
 
   if (uploadsInFlight >= UPLOAD_MAX_CONCURRENT) {
+    recordCheck('busy')
     res.setHeader('Connection', 'close')
     res.status(503).set('Retry-After', '5').json({ reason: 'busy' })
     return
   }
   uploadsInFlight++
+  const releaseSlot = slotOpened()
 
   const abort = new AbortController()
   const onClose = () => { if (!res.writableEnded) abort.abort() }
@@ -358,6 +367,7 @@ app.post('/:shareType(share|s)/:key/check', decodeCookie, asyncHandler(async (re
      * response: knowing "yes" is the whole point, knowing which row is not.
      */
     if (!result.available) {
+      recordCheck('unavailable')
       // Honest about not knowing. The client uploads either way, but an
       // operator watching responses can tell a working check that finds
       // nothing from one that has stopped working.
@@ -365,9 +375,13 @@ app.post('/:shareType(share|s)/:key/check', decodeCookie, asyncHandler(async (re
       return
     }
     const inThisShare = !!result.id && resolved.link.assets.some(a => a.id === result.id)
+    // One counter, not hit/miss: whether the owner holds a given file is the
+    // library's business, and a hit/miss split would put that in the log.
+    recordCheck('answered')
     res.json({ duplicate: inThisShare, checked: true })
   } finally {
     uploadsInFlight--
+    releaseSlot()
     unbind()
     res.off('close', onClose)
   }
@@ -427,6 +441,7 @@ app.post('/:shareType(share|s)/:key/upload', decodeCookie, asyncHandler(async (r
   }
 
   if (uploadsInFlight >= UPLOAD_MAX_CONCURRENT) {
+    recordUpload('busy')
     res.setHeader('Connection', 'close')
     res.status(503).set('Retry-After', '5').json({ reason: 'busy' })
     return
@@ -439,6 +454,7 @@ app.post('/:shareType(share|s)/:key/upload', decodeCookie, asyncHandler(async (r
    * the check together and then all increment, which is no cap at all.
    */
   uploadsInFlight++
+  const releaseSlot = slotOpened()
 
   // Register disconnect handling BEFORE the first await: the visitor can go
   // away during share resolution too. `res` close (rather than the request's
@@ -454,6 +470,7 @@ app.post('/:shareType(share|s)/:key/upload', decodeCookie, asyncHandler(async (r
     await handleUpload(req, res, keyType, abort)
   } finally {
     uploadsInFlight--
+    releaseSlot()
     unbind()
     res.off('close', onClose)
   }
@@ -462,11 +479,15 @@ app.post('/:shareType(share|s)/:key/upload', decodeCookie, asyncHandler(async (r
 async function handleUpload (req: Request, res: Response, keyType: KeyType, abort: AbortController): Promise<void> {
   const resolved = await resolveShare(req, keyType)
   if (!resolved.ok) {
+    // 401 and 404 collapse into one label deliberately: a log that
+    // distinguished them would say which keys exist.
+    recordUpload('unresolved-share')
     failUpload(res, resolved.status, resolved.reason)
     return
   }
   const refusal = uploadRefusal(resolved.link)
   if (refusal) {
+    recordUpload(refusal)
     // 403, not 404: the share resolved, so this is "you may not", not "no
     // such thing". `album-full` and `expired` in particular are states a
     // legitimate visitor reaches mid-session.
@@ -478,11 +499,13 @@ async function handleUpload (req: Request, res: Response, keyType: KeyType, abor
 
   const contentType = String(req.headers['content-type'] || '')
   if (!/^(image|video)\//.test(contentType)) {
+    recordUpload('not-media')
     refuseUpload(res, 400, 'not-media')
     return
   }
   const createdAt = parseCreatedAt(req.headers['x-ipp-created-at'])
   if (!createdAt) {
+    recordUpload('bad-date')
     refuseUpload(res, 400, 'bad-date')
     return
   }
@@ -492,6 +515,7 @@ async function handleUpload (req: Request, res: Response, keyType: KeyType, abor
   // stream/upload.ts, because a chunked request carries no Content-Length.
   const declared = Number(req.headers['content-length'] || 0)
   if (declared && declared > maxBytes) {
+    recordUpload('too-large')
     refuseUpload(res, 413, 'too-large', { maxBytes })
     return
   }
@@ -510,9 +534,17 @@ async function handleUpload (req: Request, res: Response, keyType: KeyType, abor
 
   if (!outcome.ok) {
     if (outcome.reason === 'aborted') {
+      // The visitor vanished, or a slot bound fired. Either way no verdict
+      // was reached, so this is not counted as a refusal.
+      recordUpload('client-gone')
       if (!res.writableEnded) res.end()
       return
     }
+    recordUpload(
+      outcome.reason === 'rejected'
+        ? 'upstream-rejected'
+        : outcome.reason === 'error' ? 'invalid-response' : outcome.reason
+    )
     // 'empty' and 'not-media' are the visitor's mistake, not Immich's: the
     // body never matched what the request claimed it was.
     const status = outcome.reason === 'too-large'
@@ -540,6 +572,9 @@ async function handleUpload (req: Request, res: Response, keyType: KeyType, abor
     invalidateShare(resolved.link.key, req.password, KeyType.key)
   }
 
+  // "created" means Immich accepted and stored it. It does not promise the
+  // thumbnail is ready or that the visitor received this response.
+  recordUpload(outcome.status === 'duplicate' ? 'duplicate' : 'created')
   res.json({ id: outcome.id, status: outcome.status })
 }
 
@@ -673,6 +708,10 @@ process.on('SIGTERM', () => {
 const port = Number(process.env.IPP_PORT) || 3000
 const server = app.listen(port, () => {
   console.log(dayjs().format() + ' Server started on port ' + port)
+  // Periodic summary of the guest-upload routes. Armed unconditionally: when
+  // uploads are disabled the counters stay empty and it stays silent, but an
+  // operator who turns them on gets visibility without a second switch.
+  startUploadReporting(UPLOAD_MAX_CONCURRENT)
   // Bail out early if the Immich server is older than IPP supports, rather
   // than silently serving broken album shares. Unknown/unreachable is
   // tolerated (logs a warning and continues) - see enforceMinimumImmichVersion.
