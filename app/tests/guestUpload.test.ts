@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest'
 import { Readable } from 'stream'
-import { ensureExtension, sanitiseFilename, uploadAsset } from '../src/stream/upload'
+import { checkDuplicate, ensureExtension, sanitiseFilename, uploadAsset } from '../src/stream/upload'
 import { canUpload, uploadRefusal } from '../src/share'
 import { sourceLabel, sourceUrl } from '../src/source'
 import { AlbumType, KeyType, SharedLink } from '../src/types'
@@ -282,6 +282,42 @@ describe('ensureExtension', () => {
 
   it('does not invent a bogus extension from a junk type', () => {
     expect(ensureExtension('upload', 'nonsense')).toBe('upload')
+  })
+})
+
+describe('duplicate pre-check availability', () => {
+  /*
+   * A pre-check that has silently stopped working - an Immich upgrade that
+   * moved the endpoint, say - must not look like a long run of genuine
+   * misses. These pin the distinction, which is the whole point of the flag.
+   */
+  const req = () => ({
+    key: 'k', keyType: KeyType.key, checksum: 'dXiglKhWoE9//diOSJLLHI2L11E='
+  })
+
+  it('reports a match', async () => {
+    vi.stubGlobal('fetch', async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ id: 'abc', status: 'duplicate' }),
+      text: async () => ''
+    }))
+    expect(await checkDuplicate(req())).toEqual({ available: true, duplicate: true, id: 'abc' })
+  })
+
+  it('treats an HTTP rejection as a MISS, because the lookup still ran', async () => {
+    // The probe body is empty on purpose: when the checksum does not match,
+    // Immich falls through to the real upload path and rejects it. That is a
+    // miss. Reading it as a failure made the flag always say "unavailable".
+    vi.stubGlobal('fetch', async () => ({
+      ok: false, status: 400, json: async () => ({}), text: async () => 'Unsupported file type'
+    }))
+    expect(await checkDuplicate(req())).toEqual({ available: true, duplicate: false })
+  })
+
+  it('reports unavailable only when there is no response at all', async () => {
+    vi.stubGlobal('fetch', async () => { throw new TypeError('fetch failed') })
+    expect(await checkDuplicate(req())).toEqual({ available: false })
   })
 })
 

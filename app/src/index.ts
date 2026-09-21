@@ -355,8 +355,15 @@ app.post('/:shareType(share|s)/:key/check', decodeCookie, asyncHandler(async (re
      * cannot already see by scrolling the gallery. The id stays out of the
      * response: knowing "yes" is the whole point, knowing which row is not.
      */
+    if (!result.available) {
+      // Honest about not knowing. The client uploads either way, but an
+      // operator watching responses can tell a working check that finds
+      // nothing from one that has stopped working.
+      res.json({ duplicate: false, checked: false })
+      return
+    }
     const inThisShare = !!result.id && resolved.link.assets.some(a => a.id === result.id)
-    res.json({ duplicate: inThisShare })
+    res.json({ duplicate: inThisShare, checked: true })
   } finally {
     uploadsInFlight--
     res.off('close', onClose)

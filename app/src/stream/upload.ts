@@ -53,6 +53,14 @@ export interface UploadRequest {
   signal?: AbortSignal
 }
 
+/**
+ * A miss and an unanswerable check are different things: the first means
+ * "send it", the second means "send it, and something is wrong".
+ */
+export type CheckResult =
+  | { available: true, duplicate: boolean, id?: string }
+  | { available: false }
+
 export type UploadOutcome =
   | { ok: true, id: string, status: string }
   | { ok: false, reason: 'too-large' | 'aborted' | 'rejected' | 'error' | 'empty' | 'not-media' }
@@ -365,7 +373,7 @@ export async function checkDuplicate (req: {
   password?: string
   checksum: string
   signal?: AbortSignal
-}): Promise<{ duplicate: boolean, id?: string }> {
+}): Promise<CheckResult> {
   const boundary = '----ippCheck' + randomUUID().replace(/-/g, '')
   const url = buildUrl(apiUrl() + '/assets', { [req.keyType]: req.key })
   const body = Buffer.from(
@@ -389,15 +397,56 @@ export async function checkDuplicate (req: {
       body,
       signal: req.signal
     })
-    if (!res.ok) { await res.text().catch(() => ''); return { duplicate: false } }
+    /*
+     * Any HTTP response means the check ran: Immich's interceptor looked the
+     * checksum up and found nothing, so the request fell through to the real
+     * upload path and was rejected there - our probe body is deliberately
+     * empty. That is a MISS, not a failure.
+     *
+     * Only the absence of a response (connection refused, timeout, DNS)
+     * means the check could not be performed. Conflating the two made the
+     * flag useless: it read "unavailable" on every miss.
+     */
+    if (!res.ok) {
+      await res.text().catch(() => '')
+      return { available: true, duplicate: false }
+    }
     const json = await res.json() as { id?: string, status?: string }
     return json?.status === 'duplicate' && json.id
-      ? { duplicate: true, id: json.id }
-      : { duplicate: false }
+      ? { available: true, duplicate: true, id: json.id }
+      : { available: true, duplicate: false }
   } catch (e) {
-    // A failed check is not a failed upload: fall through and send the file.
-    return { duplicate: false }
+    // A failed check is not a failed upload: the caller sends the file. But
+    // it is not a MISS either, and conflating the two is how a pre-check
+    // that has silently stopped working goes unnoticed for months.
+    noteUnavailable(e instanceof Error ? e.message : String(e))
+    return { available: false }
   }
+}
+
+/**
+ * Report that the duplicate check could not answer.
+ *
+ * Rate-limited, because the failure mode this exists for is "every check,
+ * forever" - an Immich upgrade that moved the endpoint, say - and that would
+ * otherwise fill the log with one line per upload. Nothing visitor-supplied
+ * is recorded: not the share key, not the checksum.
+ */
+let lastUnavailableLog = 0
+let unavailableSince = 0
+let unavailableCount = 0
+
+function noteUnavailable (detail: string): void {
+  unavailableCount++
+  if (!unavailableSince) unavailableSince = Date.now()
+  const now = Date.now()
+  if (now - lastUnavailableLog < 60_000) return
+  lastUnavailableLog = now
+  const mins = Math.round((now - unavailableSince) / 60_000)
+  log.warn(
+    `Duplicate pre-check unavailable (${unavailableCount} time(s)` +
+    `${mins >= 1 ? `, for ${mins} min` : ''}); uploads continue without it. Last reason: ${detail}`
+  )
 }
 
 /** Visitor went away, or our own abort signal fired first. */

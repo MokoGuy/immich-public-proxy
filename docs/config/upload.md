@@ -333,6 +333,13 @@ deduplicates it without filing it — so the loss is bytes, not an outcome.
 Checks share the upload concurrency budget and are cancelled when the visitor
 disconnects.
 
+**A check that cannot answer is not a miss.** The response carries
+`checked: true|false`, and the server logs — at most once a minute, with
+nothing visitor-supplied in it — when the check is unavailable. Without that
+distinction, a pre-check broken by an Immich upgrade would look exactly like
+a long run of genuine misses and could go unnoticed indefinitely. Uploads
+continue regardless; only the optimisation is lost.
+
 ### Progress
 
 Transfer progress comes from `XMLHttpRequest`, because `fetch()` reports

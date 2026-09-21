@@ -360,8 +360,12 @@ run('guest upload against a live Immich', () => {
         method: 'POST', headers: { 'X-IPP-Checksum': sha1 }
       })
       expect(res.status).toBe(200)
-      const body = await res.json() as { duplicate: boolean, id?: string }
+      const body = await res.json() as { duplicate: boolean, checked?: boolean, id?: string }
       expect(body.duplicate).toBe(true)
+      // `checked` separates a working check that found nothing from one that
+      // could not answer - the difference that makes a silently dead
+      // pre-check visible instead of looking like a run of misses.
+      expect(body.checked).toBe(true)
       // The answer is yes/no. Which asset it is would be disclosure for
       // nothing - the visitor can already see the album.
       expect(body.id).toBeUndefined()
@@ -391,8 +395,10 @@ run('guest upload against a live Immich', () => {
         method: 'POST', headers: { 'X-IPP-Checksum': sha1 }
       })
       expect(res.status).toBe(200)
-      expect((await res.json() as { duplicate: boolean }).duplicate,
-        'the check leaked a file held outside this share').toBe(false)
+      const outside = await res.json() as { duplicate: boolean, checked?: boolean }
+      expect(outside.duplicate, 'the check leaked a file held outside this share').toBe(false)
+      // A real miss, not an unanswerable check.
+      expect(outside.checked).toBe(true)
     }, 120000)
 
     it('refuses anything that is not a base64 SHA-1', async () => {
