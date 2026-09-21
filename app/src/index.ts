@@ -320,13 +320,47 @@ app.post('/:shareType(share|s)/:key/check', decodeCookie, asyncHandler(async (re
     return
   }
 
-  const result = await checkDuplicate({
-    key: req.params.key,
-    keyType,
-    password: req.password,
-    checksum
-  })
-  res.json(result)
+  if (uploadsInFlight >= UPLOAD_MAX_CONCURRENT) {
+    res.setHeader('Connection', 'close')
+    res.status(503).set('Retry-After', '5').json({ reason: 'busy' })
+    return
+  }
+  uploadsInFlight++
+
+  const abort = new AbortController()
+  const onClose = () => { if (!res.writableEnded) abort.abort() }
+  res.on('close', onClose)
+
+  try {
+    const result = await checkDuplicate({
+      key: req.params.key,
+      keyType,
+      password: req.password,
+      checksum,
+      signal: abort.signal
+    })
+
+    /*
+     * Only answer for assets THIS share already shows.
+     *
+     * Immich looks a checksum up across the owner's entire library
+     * (`getUploadAssetIdByChecksum(auth.user.id, ...)`), so an unrestricted
+     * answer would tell a link holder whether the owner has a given file
+     * anywhere - including files too large or of a type an upload would have
+     * refused, and without them possessing the bytes at all. That is a
+     * genuinely wider disclosure than an ordinary upload, which needs the
+     * file and passes the size and media checks first.
+     *
+     * Confined to the share's own assets it tells the visitor nothing they
+     * cannot already see by scrolling the gallery. The id stays out of the
+     * response: knowing "yes" is the whole point, knowing which row is not.
+     */
+    const inThisShare = !!result.id && resolved.link.assets.some(a => a.id === result.id)
+    res.json({ duplicate: inThisShare })
+  } finally {
+    uploadsInFlight--
+    res.off('close', onClose)
+  }
 }))
 
 /*

@@ -12,6 +12,7 @@ environment contract; without it the whole file is skipped.
 */
 
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
+import { createHash } from 'crypto'
 import {
   E2EConfig,
   ImmichFixtures,
@@ -343,6 +344,74 @@ run('guest upload against a live Immich', () => {
         fx.track((await accepted.json() as { id: string }).id)
       }
     }, 120000)
+  })
+
+  describe('duplicate pre-check', () => {
+    it('reports a duplicate for content this share already shows', async () => {
+      const bytes = makePng(130, 100, false, 808)
+      const up = await uploadToIpp(c, `/share/${uploadKey}`, bytes, {
+        filename: 'precheck-seed.png', createdAt: CREATED_AT
+      })
+      expect(up.status).toBe(200)
+      fx.track((await up.json() as { id: string }).id)
+
+      const sha1 = createHash('sha1').update(bytes).digest('base64')
+      const res = await fetch(`${c.ippUrl}/share/${uploadKey}/check`, {
+        method: 'POST', headers: { 'X-IPP-Checksum': sha1 }
+      })
+      expect(res.status).toBe(200)
+      const body = await res.json() as { duplicate: boolean, id?: string }
+      expect(body.duplicate).toBe(true)
+      // The answer is yes/no. Which asset it is would be disclosure for
+      // nothing - the visitor can already see the album.
+      expect(body.id).toBeUndefined()
+    }, 90000)
+
+    it('does NOT reveal content the owner holds outside this share', async () => {
+      /*
+       * The security-relevant case. Immich looks a checksum up across the
+       * owner's whole library, so an unrestricted answer would let a link
+       * holder test for any file - including ones too large to upload, and
+       * without possessing the bytes. Confined to the share, it says nothing
+       * the gallery does not.
+       */
+      const otherAlbum = await fx.createAlbum('elsewhere')
+      const otherLink = await fx.createShareLink(otherAlbum, { allowUpload: true })
+      const secret = makePng(140, 110, true, 909)
+
+      const up = await uploadToIpp(c, `/share/${otherLink.key}`, secret, {
+        filename: 'elsewhere.png', createdAt: CREATED_AT
+      })
+      expect(up.status).toBe(200)
+      fx.track((await up.json() as { id: string }).id)
+
+      // Same owner, same bytes - but not in the album this link shares.
+      const sha1 = createHash('sha1').update(secret).digest('base64')
+      const res = await fetch(`${c.ippUrl}/share/${uploadKey}/check`, {
+        method: 'POST', headers: { 'X-IPP-Checksum': sha1 }
+      })
+      expect(res.status).toBe(200)
+      expect((await res.json() as { duplicate: boolean }).duplicate,
+        'the check leaked a file held outside this share').toBe(false)
+    }, 120000)
+
+    it('refuses anything that is not a base64 SHA-1', async () => {
+      for (const bad of ['', 'not-a-checksum', 'A'.repeat(64), '../../etc']) {
+        const res = await fetch(`${c.ippUrl}/share/${uploadKey}/check`, {
+          method: 'POST', headers: { 'X-IPP-Checksum': bad }
+        })
+        expect(res.status, `accepted ${JSON.stringify(bad)}`).toBe(400)
+      }
+    }, 60000)
+
+    it('is refused on a link that may not upload', async () => {
+      const sha1 = createHash('sha1').update(makePng(20, 20)).digest('base64')
+      const res = await fetch(`${c.ippUrl}/share/${noUploadKey}/check`, {
+        method: 'POST', headers: { 'X-IPP-Checksum': sha1 }
+      })
+      expect(res.status).toBe(403)
+      expect((await res.json() as { reason: string }).reason).toBe('not-allowed')
+    }, 60000)
   })
 
   describe('write restrictions', () => {

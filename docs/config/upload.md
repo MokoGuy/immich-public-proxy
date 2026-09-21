@@ -315,10 +315,23 @@ duplicate is still caught by Immich, just after the transfer — which is the
 behaviour that existed before this. A broken check must never stop a file
 being sent.
 
-On privacy: a link holder can use this to learn whether the owner already has
-a given file. That is not new — an ordinary upload already reports
-`duplicate` — but it does make probing cheap, which is why the check sits
-behind exactly the same gate as an upload.
+**The answer is confined to this share.** Immich looks a checksum up across
+the owner's *entire library*, so an unrestricted answer would let a link
+holder test whether the owner has any given file — including files too large
+or of a type an upload would have refused, and **without possessing the bytes
+at all**, which a catalogue of hashes makes cheap.
+
+That is genuinely wider than what an ordinary upload discloses, so a positive
+answer is only returned when the asset is already in the shared album — which
+the visitor can see by scrolling the gallery. The response carries no asset
+id: knowing "yes" is the point, knowing which row is not.
+
+The cost of that restriction: a photo the owner holds elsewhere gets
+re-uploaded. It would not have been added to the album anyway — Immich
+deduplicates it without filing it — so the loss is bytes, not an outcome.
+
+Checks share the upload concurrency budget and are cancelled when the visitor
+disconnects.
 
 ### Progress
 

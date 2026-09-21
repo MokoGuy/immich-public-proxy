@@ -325,6 +325,11 @@ async function run (): Promise<void> {
      * browser's own digest rather than maintaining one. A check that does not
      * work must never stop a file being sent.
      */
+    // Cancellation has to cover hashing and the check too, not just the
+    // transfer: Stop during a 200 MB hash used to let the whole file upload
+    // afterwards anyway.
+    controller = new AbortController()
+
     if (canCheck) {
       item.state = 'checking'
       item.progress = undefined
@@ -333,7 +338,8 @@ async function run (): Promise<void> {
         const checksum = await sha1File(item.file)
         const res = await fetch(target.checkPath, {
           method: 'POST',
-          headers: { 'X-IPP-Checksum': checksum }
+          headers: { 'X-IPP-Checksum': checksum },
+          signal: controller.signal
         })
         if (res.ok && (await res.json() as { duplicate?: boolean }).duplicate) {
           item.state = 'duplicate'
@@ -347,12 +353,14 @@ async function run (): Promise<void> {
       }
     }
 
+    // Stop may have been pressed while hashing or checking.
+    if (stopped) { controller = null; break }
+
     item.state = 'sending'
     item.progress = undefined
     renderItem(item); renderPanel()
     announce(`Uploading ${item.file.name}`, true)
 
-    controller = new AbortController()
     const outcome: UploadOutcome = await uploadFile({
       url: target.path,
       file: item.file,

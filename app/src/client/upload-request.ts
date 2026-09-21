@@ -151,7 +151,15 @@ async function requestLock (): Promise<void> {
   const nav = navigator as WakeLockNavigator
   if (wakeLock || !nav.wakeLock) return
   try {
-    wakeLock = await nav.wakeLock.request('screen')
+    const sentinel = await nav.wakeLock.request('screen')
+    // The queue may have finished while this was in flight. Storing the
+    // sentinel then would leave the screen awake with nothing uploading, and
+    // releaseWakeLock has already run and seen nothing to release.
+    if (!wantWakeLock || wakeLock) {
+      await sentinel.release().catch(() => undefined)
+      return
+    }
+    wakeLock = sentinel
   } catch (e) { /* denied, low battery, or hidden document */ }
 }
 
