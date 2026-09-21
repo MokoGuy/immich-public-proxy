@@ -201,6 +201,49 @@ test.describe('guest upload in the browser', () => {
     expect(seen.join('\n')).toMatch(/\d+\s*(KB|MB)\/s/)
   })
 
+  test('keeps the spinner alive across progress updates', async ({ page }) => {
+    /*
+     * Reported from a phone: the spinner restarted several times a second.
+     * Cause was rebuilding the row's innerHTML on every progress event, which
+     * destroys and recreates the SVG so its CSS animation begins again.
+     *
+     * Asserting "a spinner is visible" would not have caught it - a brand new
+     * spinner is visible too. This holds a handle to the original element and
+     * requires that very node to still be in the document after many updates.
+     */
+    await page.goto(`${cfg!.ippUrl}/share/${uploadKey}`)
+    const client = await page.context().newCDPSession(page)
+    await client.send('Network.emulateNetworkConditions', {
+      offline: false, latency: 100, downloadThroughput: 4_000_000, uploadThroughput: 100_000
+    })
+
+    const chooser = page.waitForEvent('filechooser')
+    await page.getByRole('button', { name: 'Add photos' }).click()
+    await (await chooser).setFiles([
+      { name: `spin-${Date.now()}.png`, mimeType: 'image/png', buffer: makePng(700, 560, true, 92) }
+    ])
+
+    const spinner = page.locator('#upload-files li .upload-ico-busy').first()
+    await expect(spinner).toBeVisible({ timeout: 30000 })
+    const handle = await spinner.elementHandle()
+    expect(handle, 'no spinner element to hold on to').toBeTruthy()
+
+    // Let a good number of progress events go by.
+    const row = page.locator('#upload-files li').first()
+    await expect(row).toContainText(/%\s+of/, { timeout: 30000 })
+    await page.waitForTimeout(3000)
+
+    expect(
+      await handle!.evaluate(el => el.isConnected),
+      'the spinner was replaced mid-transfer, so its animation restarts'
+    ).toBe(true)
+
+    // And the bar really did move while that same node stayed put.
+    const width = await page.locator('#upload-files li .upload-bar-fill').first()
+      .evaluate(el => parseFloat((el as HTMLElement).style.width))
+    expect(width).toBeGreaterThan(0)
+  })
+
   test('minimises to a badge and comes back', async ({ page }) => {
     await page.goto(`${cfg!.ippUrl}/share/${uploadKey}`)
     const chooser = page.waitForEvent('filechooser')

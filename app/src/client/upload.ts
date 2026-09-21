@@ -21,6 +21,10 @@ interface Item {
   progress?: UploadProgress
   reason?: string
   el?: HTMLLIElement
+  /** Last state the row's structure was built for; see renderItem. */
+  builtFor?: ItemState
+  bar?: HTMLElement
+  detail?: HTMLElement
 }
 
 interface Target { path: string, maxBytes: number }
@@ -129,33 +133,63 @@ function detailFor (item: Item): string {
   }
 }
 
+/**
+ * Draw a row.
+ *
+ * Structure is rebuilt only when the STATE changes; a progress tick just
+ * writes the bar width and the detail text. Rebuilding `innerHTML` on every
+ * tick destroys and recreates the spinner several times a second, so its CSS
+ * animation restarts from zero each time and it visibly stutters instead of
+ * spinning. Keeping the element alive is the whole point.
+ */
 function renderItem (item: Item): void {
   if (!item.el) return
+
+  if (item.builtFor !== item.state) {
+    item.el.className = `upload-item upload-item-${item.state}`
+    const showBar = item.state === 'sending' || item.state === 'confirming'
+    item.el.innerHTML =
+      `<div class="upload-item-head">
+         ${iconFor(item)}
+         <span class="upload-name">${escapeHtml(item.file.name || 'file')}</span>
+         ${item.state === 'failed' ? `<button type="button" class="upload-icon-btn upload-retry" aria-label="Retry ${escapeHtml(item.file.name)}">${svg(ICON.retry, '')}</button>` : ''}
+       </div>` +
+      (showBar
+        ? `<div class="upload-bar${item.state === 'confirming' ? ' upload-bar-pending' : ''}">
+             <div class="upload-bar-fill" style="width:0%"></div>
+           </div>`
+        : '') +
+      '<p class="upload-detail" hidden></p>'
+
+    item.bar = item.el.querySelector<HTMLElement>('.upload-bar-fill') ?? undefined
+    item.detail = item.el.querySelector<HTMLElement>('.upload-detail') ?? undefined
+    item.builtFor = item.state
+
+    item.el.querySelector('.upload-retry')?.addEventListener('click', () => {
+      item.state = 'waiting'
+      item.reason = undefined
+      renderItem(item)
+      run().catch(() => { /* every failure path already lands in the panel */ })
+    })
+  }
+
+  updateItemValues(item)
+}
+
+/** The parts that change while the state does not: bar width and detail text. */
+function updateItemValues (item: Item): void {
   const p = item.progress
-  const pct = p && p.total ? Math.min(100, Math.round((p.loaded / p.total) * 100)) : 0
-  const showBar = item.state === 'sending' || item.state === 'confirming'
-
-  item.el.className = `upload-item upload-item-${item.state}`
-  item.el.innerHTML =
-    `<div class="upload-item-head">
-       ${iconFor(item)}
-       <span class="upload-name">${escapeHtml(item.file.name || 'file')}</span>
-       ${item.state === 'failed' ? `<button type="button" class="upload-icon-btn upload-retry" aria-label="Retry ${escapeHtml(item.file.name)}">${svg(ICON.retry, '')}</button>` : ''}
-     </div>` +
-    (showBar
-      ? `<div class="upload-bar${item.state === 'confirming' ? ' upload-bar-pending' : ''}">
-           <div class="upload-bar-fill" style="width:${item.state === 'confirming' ? 100 : pct}%"></div>
-         </div>`
-      : '') +
-    (detailFor(item) ? `<p class="upload-detail">${escapeHtml(detailFor(item))}</p>` : '')
-
-  const retry = item.el.querySelector('.upload-retry')
-  retry?.addEventListener('click', () => {
-    item.state = 'waiting'
-    item.reason = undefined
-    renderItem(item)
-    run().catch(() => { /* every failure path already lands in the panel */ })
-  })
+  if (item.bar) {
+    const pct = item.state === 'confirming'
+      ? 100
+      : (p && p.total ? Math.min(100, Math.round((p.loaded / p.total) * 100)) : 0)
+    item.bar.style.width = `${pct}%`
+  }
+  if (item.detail) {
+    const text = detailFor(item)
+    item.detail.textContent = text
+    item.detail.hidden = !text
+  }
 }
 
 function escapeHtml (s: string): string {
@@ -267,7 +301,9 @@ async function run (): Promise<void> {
       },
       onProgress: (p) => {
         item.progress = p
-        renderItem(item)
+        // Values only: rebuilding the row here is what made the spinner
+        // restart on every tick.
+        updateItemValues(item)
         const pct = p.total ? Math.round((p.loaded / p.total) * 100) : 0
         if (pct >= 25) announce(`${item.file.name}, ${pct} percent`)
       }
