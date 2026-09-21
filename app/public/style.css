@@ -245,7 +245,8 @@ html, body {
   opacity: 0.55;
 }
 
-#download-all {
+#download-all,
+#upload-open {
   flex: 0 0 auto;
   display: inline-flex;
   align-items: center;
@@ -259,12 +260,15 @@ html, body {
 }
 
 #download-all:hover,
-#download-all:focus-visible {
+#download-all:focus-visible,
+#upload-open:hover,
+#upload-open:focus-visible {
   background-color: color-mix(in srgb, var(--color-fg) 10%, transparent);
   outline: none;
 }
 
-#download-all svg {
+#download-all svg,
+#upload-open svg {
   width: 22px;
   height: 22px;
 }
@@ -548,18 +552,17 @@ html.ipp-sidebar-open .ipp-sidebar {
 }
 
 /* ---- Guest upload (fork: feat/guest-upload) ---- */
-#header .header-btn {
+/*
+ * The upload control is a peer of the download control, so it shares its
+ * rules above rather than carrying a parallel set. A <button> needs its
+ * browser chrome removed to match an <a>; everything else - the 44px target,
+ * the icon size, the hover treatment - comes from #download-all.
+ */
+#upload-open {
   background: none;
   border: none;
-  padding: 0;
   cursor: pointer;
-  color: inherit;
-  display: inline-flex;
-  align-items: center;
-}
-#header .header-btn svg {
-  width: 24px;
-  height: 24px;
+  font: inherit;
 }
 #upload-status {
   margin: 0 auto;

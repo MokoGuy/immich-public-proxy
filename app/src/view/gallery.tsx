@@ -100,7 +100,7 @@ export function Gallery (props: GalleryProps) {
             {props.uploadPath && (
               <>
                 <input id="upload-input" type="file" accept="image/*,video/*" multiple hidden/>
-                <button id="upload-open" class="header-btn" type="button" title="Add photos" aria-label="Add photos">
+                <button id="upload-open" type="button" title="Add photos" aria-label="Add photos">
                   <svg viewBox="0 0 24 24" aria-hidden="true">
                     <path fill="currentColor" d="M19,13H13V19H11V13H5V11H11V5H13V11H19V13Z"/>
                   </svg>
