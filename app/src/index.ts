@@ -18,7 +18,7 @@ import { buildAssetMetadata } from './gallery/metadata'
 import crypto from 'crypto'
 import { assetBuffer } from './stream/asset'
 import { downloadAssets } from './stream/download'
-import { uploadAsset } from './stream/upload'
+import { checkDuplicate, uploadAsset } from './stream/upload'
 import dayjs from 'dayjs'
 import { NextFunction, Request, Response } from 'express-serve-static-core'
 import { Asset, AssetType, ImageSize, KeyType, SharedLink } from './types'
@@ -279,6 +279,54 @@ app.post('/:shareType(share|s)/:key/download', decodeCookie, asyncHandler(async 
   }
 
   await downloadAssets(res, resolved.link, validAssets)
+}))
+
+/*
+ * [ROUTE] Ask whether the album's owner already holds this content.
+ *
+ * The visitor sends a SHA-1 in `X-IPP-Checksum` and nothing else; if Immich
+ * recognises it, the file never has to leave the device. That matters most on
+ * the large files - skipping a five-minute video upload, not a two-second
+ * photo.
+ *
+ * Same gate as an upload, deliberately: this must not become a way to probe a
+ * library through a link that cannot write to it. It is not new information
+ * either way - an ordinary upload already reports `duplicate` - but it does
+ * make probing cheap, which is why it stays behind the same door.
+ */
+app.post('/:shareType(share|s)/:key/check', decodeCookie, asyncHandler(async (req, res) => {
+  const keyType = getKeyTypeFromShare(req.params.shareType)
+  if (keyType === KeyType.slug && !getConfigOption('ipp.allowSlugLinks', true)) {
+    failUpload(res, 404, 'Slug links are disabled in config.json')
+    return
+  }
+
+  const resolved = await resolveShare(req, keyType)
+  if (!resolved.ok) {
+    failUpload(res, resolved.status, resolved.reason)
+    return
+  }
+  const refusal = uploadRefusal(resolved.link)
+  if (refusal) {
+    refuseUpload(res, 403, refusal)
+    return
+  }
+
+  // Base64 of 20 bytes: 27 characters plus '='. Anything else is not a SHA-1
+  // and has no business reaching Immich.
+  const checksum = toString(req.headers['x-ipp-checksum'])
+  if (!/^[A-Za-z0-9+/]{27}=$/.test(checksum)) {
+    refuseUpload(res, 400, 'bad-checksum')
+    return
+  }
+
+  const result = await checkDuplicate({
+    key: req.params.key,
+    keyType,
+    password: req.password,
+    checksum
+  })
+  res.json(result)
 }))
 
 /*

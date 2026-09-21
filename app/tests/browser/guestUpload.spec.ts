@@ -223,14 +223,19 @@ test.describe('guest upload in the browser', () => {
       { name: `spin-${Date.now()}.png`, mimeType: 'image/png', buffer: makePng(700, 560, true, 92) }
     ])
 
-    const spinner = page.locator('#upload-files li .upload-ico-busy').first()
-    await expect(spinner).toBeVisible({ timeout: 30000 })
+    // Wait until the row is SENDING before taking the handle. The row passes
+    // through a 'checking' state first, and rebuilding on a state change is
+    // correct - the claim is that the spinner survives progress updates
+    // WITHIN a state, not across every transition.
+    const row = page.locator('#upload-files li').first()
+    await expect(row).toContainText(/%\s+of/, { timeout: 60000 })
+
+    const spinner = row.locator('.upload-ico-busy')
+    await expect(spinner).toBeVisible()
     const handle = await spinner.elementHandle()
     expect(handle, 'no spinner element to hold on to').toBeTruthy()
 
     // Let a good number of progress events go by.
-    const row = page.locator('#upload-files li').first()
-    await expect(row).toContainText(/%\s+of/, { timeout: 30000 })
     await page.waitForTimeout(3000)
 
     expect(
@@ -242,6 +247,77 @@ test.describe('guest upload in the browser', () => {
     const width = await page.locator('#upload-files li .upload-bar-fill').first()
       .evaluate(el => parseFloat((el as HTMLElement).style.width))
     expect(width).toBeGreaterThan(0)
+  })
+
+  test('skips a file the owner already has, without uploading it', async ({ page }) => {
+    /*
+     * The point of the pre-check is bytes NOT sent, so this asserts on the
+     * network: after the first upload, re-selecting the same content must
+     * produce a /check request and no /upload request at all.
+     *
+     * Throttled, because on loopback an upload is fast enough that "it was
+     * skipped" and "it uploaded quickly" look the same.
+     */
+    await page.goto(`${cfg!.ippUrl}/share/${uploadKey}`)
+    const bytes = makePng(600, 480, true, 77)
+    const name = `dup-${Date.now()}.png`
+
+    // First time: it really does upload.
+    const firstChooser = page.waitForEvent('filechooser')
+    await page.getByRole('button', { name: 'Add photos' }).click()
+    await (await firstChooser).setFiles([{ name, mimeType: 'image/png', buffer: bytes }])
+    await expect(page.locator('#upload-files li', { hasText: name }))
+      .toContainText('Added', { timeout: 60000 })
+
+    // Second time: same bytes, different name - dedup is on content.
+    await page.reload()
+    const client = await page.context().newCDPSession(page)
+    await client.send('Network.emulateNetworkConditions', {
+      offline: false, latency: 100, downloadThroughput: 4_000_000, uploadThroughput: 100_000
+    })
+    const posts: string[] = []
+    page.on('request', r => {
+      if (r.method() === 'POST' && /\/(check|upload)$/.test(new URL(r.url()).pathname)) {
+        posts.push(new URL(r.url()).pathname.split('/').pop()!)
+      }
+    })
+
+    const secondName = `copy-${Date.now()}.png`
+    const chooser = page.waitForEvent('filechooser')
+    await page.getByRole('button', { name: 'Add photos' }).click()
+    await (await chooser).setFiles([{ name: secondName, mimeType: 'image/png', buffer: bytes }])
+
+    const row = page.locator('#upload-files li', { hasText: secondName })
+    await expect(row).toContainText(/already uploaded/i, { timeout: 60000 })
+    await expect(row).toHaveClass(/upload-item-duplicate/)
+
+    expect(posts, `requests seen: ${posts.join(',')}`).toContain('check')
+    expect(posts, 'the file was uploaded even though it was already known')
+      .not.toContain('upload')
+  })
+
+  test('uploads normally when the content is new', async ({ page }) => {
+    // The mirror of the test above: a pre-check that answered "duplicate" for
+    // everything would pass that one and break the feature entirely.
+    await page.goto(`${cfg!.ippUrl}/share/${uploadKey}`)
+    const posts: string[] = []
+    page.on('request', r => {
+      if (r.method() === 'POST' && /\/(check|upload)$/.test(new URL(r.url()).pathname)) {
+        posts.push(new URL(r.url()).pathname.split('/').pop()!)
+      }
+    })
+
+    const name = `fresh-${Date.now()}.png`
+    const chooser = page.waitForEvent('filechooser')
+    await page.getByRole('button', { name: 'Add photos' }).click()
+    await (await chooser).setFiles([
+      { name, mimeType: 'image/png', buffer: makePng(300, 240, true, Date.now() % 1000) }
+    ])
+
+    await expect(page.locator('#upload-files li', { hasText: name }))
+      .toContainText('Added', { timeout: 60000 })
+    expect(posts).toContain('check')
+    expect(posts, 'new content must still be uploaded').toContain('upload')
   })
 
   test('minimises to a badge and comes back', async ({ page }) => {

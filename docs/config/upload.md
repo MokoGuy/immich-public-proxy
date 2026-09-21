@@ -282,6 +282,44 @@ Being `position: fixed` is load-bearing beyond looks: the panel never changes
 the gallery's layout, so the virtualiser — which only recomputes on a width
 change — has nothing to reconcile.
 
+### Skipping what is already there
+
+Before sending, the browser hashes the file and asks whether the owner
+already holds those bytes. If so, nothing is transferred.
+
+This matters most on the files it costs most to check: skipping a
+five-minute video upload pays for a second of hashing many times over, while
+on a 2 MB photo both are imperceptible.
+
+The mechanism is Immich's `x-immich-checksum` header on the upload route.
+Its `AssetUploadInterceptor` answers `duplicate` **before** the file
+interceptor runs, so the body is never read — one round trip, no media bytes.
+The dedicated endpoint for this, `POST /assets/bulk-upload-check`, is not an
+option: unlike the upload route it carries no `sharedLink: true`, so a share
+key gets `403`. Verified against Immich 3.2.2.
+
+The digest is SHA-1 because that is what Immich compares. It is a **content
+fingerprint for duplicate detection, not a security primitive** — SHA-1 is
+unsuitable for the latter, and nothing here relies on it being.
+
+Hashing uses the browser's own `crypto.subtle.digest`. That has no
+incremental API, so the file is buffered whole: on a large video that is a
+real allocation, and on a loaded phone it can fail. A hand-written streaming
+digest would avoid it, and was written and tested — then removed. Maintaining
+our own cryptographic primitive is not worth it for a duplicate check,
+however well tested.
+
+**Every failure falls through to an ordinary upload**: plain HTTP (WebCrypto
+needs a secure context), a failed allocation, a check that errors. The
+duplicate is still caught by Immich, just after the transfer — which is the
+behaviour that existed before this. A broken check must never stop a file
+being sent.
+
+On privacy: a link holder can use this to learn whether the owner already has
+a given file. That is not new — an ordinary upload already reports
+`duplicate` — but it does make probing cheap, which is why the check sits
+behind exactly the same gate as an upload.
+
 ### Progress
 
 Transfer progress comes from `XMLHttpRequest`, because `fetch()` reports
@@ -303,11 +341,15 @@ A **screen wake lock is requested** while uploads are in flight — the same
 thing Immich's panel does — because both mobile platforms suspend a
 backgrounded page and kill the upload.
 
-This is a request, not a guarantee: the API is missing on some browsers, the
-user agent may deny it, and the system releases the lock when the tab is
-hidden without it being reacquired. That is why the panel also says to keep
-the page open, and why nothing here promises an upload survives being
-backgrounded.
+Support is narrower than the rest of this feature: Safari iOS 16.4+, Chrome
+Android 152+, secure context only. And the system **releases the lock
+whenever the document becomes hidden**, so it is re-acquired on
+`visibilitychange` — without that, glancing at another app returns you to an
+upload with no lock, which is the usual way this API is got wrong.
+
+It remains a request, not a guarantee: unsupported, denied, or released and
+not regained. That is why the panel also says to keep the page open, and why
+nothing here promises an upload survives being backgrounded.
 
 ### States
 

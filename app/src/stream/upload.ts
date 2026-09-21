@@ -345,6 +345,61 @@ export async function uploadAsset (req: UploadRequest): Promise<UploadOutcome> {
   }
 }
 
+/**
+ * Ask Immich whether it already holds this content, without sending it.
+ *
+ * Immich's `AssetUploadInterceptor` reads `x-immich-checksum` and answers
+ * `duplicate` BEFORE the file interceptor runs, so the body is never read.
+ * That is what makes this cheap: one round trip and no media bytes.
+ *
+ * The dedicated endpoint for this, `POST /assets/bulk-upload-check`, is not
+ * an option - unlike the upload route it carries no `sharedLink: true`, so a
+ * share key gets 403. Verified against Immich 3.2.2.
+ *
+ * A body still has to be present for the multipart route to accept the
+ * request; it is never read when the checksum matches.
+ */
+export async function checkDuplicate (req: {
+  key: string
+  keyType: KeyType
+  password?: string
+  checksum: string
+  signal?: AbortSignal
+}): Promise<{ duplicate: boolean, id?: string }> {
+  const boundary = '----ippCheck' + randomUUID().replace(/-/g, '')
+  const url = buildUrl(apiUrl() + '/assets', { [req.keyType]: req.key })
+  const body = Buffer.from(
+    `--${boundary}\r\nContent-Disposition: form-data; name="deviceAssetId"\r\n\r\n${randomUUID()}\r\n` +
+    `--${boundary}\r\nContent-Disposition: form-data; name="deviceId"\r\n\r\n${DEVICE_ID}\r\n` +
+    `--${boundary}\r\nContent-Disposition: form-data; name="fileCreatedAt"\r\n\r\n${new Date().toISOString()}\r\n` +
+    `--${boundary}\r\nContent-Disposition: form-data; name="fileModifiedAt"\r\n\r\n${new Date().toISOString()}\r\n` +
+    `--${boundary}\r\nContent-Disposition: form-data; name="assetData"; filename="probe"\r\n` +
+    'Content-Type: application/octet-stream\r\n\r\n' +
+    `\r\n--${boundary}--\r\n`
+  )
+
+  try {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: {
+        ...(await authHeaders(req.keyType, req.key, req.password)),
+        'Content-Type': `multipart/form-data; boundary=${boundary}`,
+        'x-immich-checksum': req.checksum
+      },
+      body,
+      signal: req.signal
+    })
+    if (!res.ok) { await res.text().catch(() => ''); return { duplicate: false } }
+    const json = await res.json() as { id?: string, status?: string }
+    return json?.status === 'duplicate' && json.id
+      ? { duplicate: true, id: json.id }
+      : { duplicate: false }
+  } catch (e) {
+    // A failed check is not a failed upload: fall through and send the file.
+    return { duplicate: false }
+  }
+}
+
 /** Visitor went away, or our own abort signal fired first. */
 function isAbort (e: unknown): boolean {
   if (!(e instanceof Error)) return false

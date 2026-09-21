@@ -125,22 +125,53 @@ export function uploadFile (opts: UploadRequestOptions): Promise<UploadOutcome> 
  * Keep the screen awake while uploads are in flight.
  *
  * Both mobile platforms suspend or discard a backgrounded page, which kills
- * the upload. Immich's own upload panel takes a wake lock for exactly this
- * reason. It is best-effort: the API is absent on some browsers and the lock
- * is released by the system when the tab is hidden anyway, so the UI still
- * has to tell people to keep the page open.
+ * the upload. Immich's own upload panel takes a wake lock for the same
+ * reason.
+ *
+ * Support is narrower than the rest of this file: Safari iOS 16.4+, Chrome
+ * Android 152+, secure context only. And the lock is RELEASED BY THE SYSTEM
+ * whenever the document becomes hidden - so it has to be re-acquired when the
+ * page comes back, or a visitor who glances at another app returns to an
+ * upload with no lock at all. That is the pattern the specification documents,
+ * and skipping it is the usual way this API is got wrong.
+ *
+ * It stays best-effort: unsupported, denied, or released and not regained,
+ * the UI still tells people to keep the page open.
  */
-let wakeLock: { release: () => Promise<void> } | null = null
+interface WakeLockSentinelLike { release: () => Promise<void> }
+type WakeLockNavigator = Navigator & {
+  wakeLock?: { request: (type: 'screen') => Promise<WakeLockSentinelLike> }
+}
 
-export async function acquireWakeLock (): Promise<void> {
-  const nav = navigator as Navigator & { wakeLock?: { request: (t: 'screen') => Promise<{ release: () => Promise<void> }> } }
+let wakeLock: WakeLockSentinelLike | null = null
+let wantWakeLock = false
+let visibilityHooked = false
+
+async function requestLock (): Promise<void> {
+  const nav = navigator as WakeLockNavigator
   if (wakeLock || !nav.wakeLock) return
   try {
     wakeLock = await nav.wakeLock.request('screen')
-  } catch (e) { /* denied or unsupported; nothing to fall back to */ }
+  } catch (e) { /* denied, low battery, or hidden document */ }
+}
+
+export async function acquireWakeLock (): Promise<void> {
+  wantWakeLock = true
+  if (!visibilityHooked) {
+    visibilityHooked = true
+    document.addEventListener('visibilitychange', () => {
+      // The system dropped it while we were hidden; take it back.
+      if (wantWakeLock && document.visibilityState === 'visible') {
+        wakeLock = null
+        requestLock().catch(() => { /* best effort */ })
+      }
+    })
+  }
+  await requestLock()
 }
 
 export async function releaseWakeLock (): Promise<void> {
+  wantWakeLock = false
   const held = wakeLock
   wakeLock = null
   try { await held?.release() } catch (e) { /* already gone */ }

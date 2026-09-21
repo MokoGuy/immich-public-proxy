@@ -216,7 +216,11 @@ export async function handleShareRequest (req: IncomingShareRequest, res: Respon
       await assetBuffer(req, res, link.assets[0], ImageSize.preview, link, directVideo)
     } else {
       // Show a gallery page
-      const openItem = getConfigOption('ipp.gallery.singleItemAutoOpen', true) ? 1 : 0
+      // Not when uploads are on: the lightbox opens over the header and the
+      // visitor cannot reach "Add photos" without dismissing it first. An
+      // album with one photo in it is exactly the one someone was invited to
+      // add to.
+      const openItem = (getConfigOption('ipp.gallery.singleItemAutoOpen', true) && !canUpload(link)) ? 1 : 0
       await gallery(res, link, openItem)
     }
   } else {

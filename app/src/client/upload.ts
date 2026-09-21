@@ -13,7 +13,7 @@ import {
   uploadFile
 } from './upload-request.js'
 
-type ItemState = 'waiting' | 'sending' | 'confirming' | 'done' | 'duplicate' | 'failed' | 'skipped'
+type ItemState = 'waiting' | 'checking' | 'sending' | 'confirming' | 'done' | 'duplicate' | 'failed' | 'skipped'
 
 interface Item {
   file: File
@@ -27,7 +27,7 @@ interface Item {
   detail?: HTMLElement
 }
 
-interface Target { path: string, maxBytes: number }
+interface Target { path: string, checkPath: string, maxBytes: number }
 
 const ICON = {
   pending: 'M12,20A8,8 0 0,1 4,12A8,8 0 0,1 12,4A8,8 0 0,1 20,12A8,8 0 0,1 12,20M12,2A10,10 0 0,0 2,12A10,10 0 0,0 12,22A10,10 0 0,0 22,12A10,10 0 0,0 12,2Z',
@@ -43,6 +43,34 @@ let running = false
 let stopped = false
 let controller: AbortController | null = null
 let lastAnnounce = 0
+
+/*
+ * The duplicate pre-check needs WebCrypto, which browsers only expose in a
+ * secure context. An instance served over plain HTTP therefore uploads
+ * without pre-checking rather than breaking.
+ */
+const canCheck = typeof crypto !== 'undefined' &&
+  typeof crypto.subtle?.digest === 'function' &&
+  typeof btoa === 'function'
+
+/**
+ * SHA-1 of a file, via the browser's own implementation.
+ *
+ * `crypto.subtle` has no incremental API, so this buffers the whole file -
+ * on a large video that is a real allocation, and on a loaded phone it can
+ * fail. That is handled where it is called: a failed check falls through to
+ * an ordinary upload.
+ *
+ * Hand-rolling a streaming digest would avoid the allocation, and was tried;
+ * it is not worth maintaining our own cryptographic primitive for a
+ * duplicate check, however well tested. Native or nothing.
+ */
+async function sha1File (file: File): Promise<string> {
+  const digest = await crypto.subtle.digest('SHA-1', await file.arrayBuffer())
+  let binary = ''
+  for (const byte of new Uint8Array(digest)) binary += String.fromCharCode(byte)
+  return btoa(binary)
+}
 
 /* ------------------------------------------------------------ formatting */
 
@@ -92,6 +120,7 @@ function svg (path: string, cls: string): string {
 function iconFor (item: Item): string {
   switch (item.state) {
     case 'waiting': return svg(ICON.pending, 'upload-ico upload-ico-idle')
+    case 'checking':
     case 'sending':
     case 'confirming': return svg(ICON.sending, 'upload-ico upload-ico-busy')
     case 'done': return svg(ICON.done, 'upload-ico upload-ico-ok')
@@ -112,6 +141,7 @@ function iconFor (item: Item): string {
 function detailFor (item: Item): string {
   switch (item.state) {
     case 'waiting': return 'Waiting'
+    case 'checking': return 'Checking if already uploaded…'
     case 'sending': {
       const p = item.progress
       if (!p) return 'Starting…'
@@ -203,7 +233,7 @@ function counts () {
     done: queue.filter(i => i.state === 'done').length,
     dup: queue.filter(i => i.state === 'duplicate').length,
     bad: queue.filter(i => i.state === 'failed').length,
-    left: queue.filter(i => i.state === 'waiting' || i.state === 'sending' || i.state === 'confirming').length
+    left: queue.filter(i => ['waiting', 'checking', 'sending', 'confirming'].includes(i.state)).length
   }
 }
 
@@ -284,6 +314,39 @@ async function run (): Promise<void> {
     if (item.file.size === 0) { fail(item, 'empty'); continue }
     if (item.file.size > target.maxBytes) { fail(item, 'too-large'); continue }
 
+    /*
+     * Ask first whether the owner already has these bytes. This is worth most
+     * on exactly the files it costs most to hash: skipping a five-minute
+     * video upload pays for a second of hashing many times over, while on a
+     * 2 MB photo both are imperceptible.
+     *
+     * Every failure here falls through to a normal upload - including the
+     * allocation failing on a large file, which is the price of using the
+     * browser's own digest rather than maintaining one. A check that does not
+     * work must never stop a file being sent.
+     */
+    if (canCheck) {
+      item.state = 'checking'
+      item.progress = undefined
+      renderItem(item); renderPanel()
+      try {
+        const checksum = await sha1File(item.file)
+        const res = await fetch(target.checkPath, {
+          method: 'POST',
+          headers: { 'X-IPP-Checksum': checksum }
+        })
+        if (res.ok && (await res.json() as { duplicate?: boolean }).duplicate) {
+          item.state = 'duplicate'
+          item.progress = undefined
+          renderItem(item); renderPanel()
+          announce(`${item.file.name} is already uploaded`, true)
+          continue
+        }
+      } catch (e) {
+        // Unsupported, blocked, or simply failed - send the file as usual.
+      }
+    }
+
     item.state = 'sending'
     item.progress = undefined
     renderItem(item); renderPanel()
@@ -361,7 +424,11 @@ const sleep = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, m
 
 export function setupUpload (path?: string, maxBytes?: number): void {
   if (!path) return
-  target = { path, maxBytes: maxBytes || Number.MAX_SAFE_INTEGER }
+  target = {
+    path,
+    checkPath: path.replace(/\/upload$/, '/check'),
+    maxBytes: maxBytes || Number.MAX_SAFE_INTEGER
+  }
 
   const input = $<HTMLInputElement>('upload-input')
   const open = $('upload-open')
