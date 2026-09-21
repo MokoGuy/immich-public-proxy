@@ -22,6 +22,8 @@ export interface E2EConfig {
   maxFileMb?: number
   /** The instance's configured ipp.upload.maxConcurrent. */
   maxConcurrent: number
+  /** A second proxy that permits writes through a slug link, if available. */
+  ippSlugUrl?: string
 }
 
 export const E2E_PREFIX = 'zz-ipp-e2e'
@@ -43,7 +45,8 @@ export function readConfig (): E2EConfig | null {
     // Guard the upper bound: the size test has to generate maxFileMb + 1
     // megabytes, and nobody wants a 200 MB buffer in a test run.
     maxFileMb: Number.isFinite(rawMax) && rawMax > 0 && rawMax <= 8 ? rawMax : undefined,
-    maxConcurrent: Math.max(1, Number(process.env.E2E_UPLOAD_MAX_CONCURRENT) || 2)
+    maxConcurrent: Math.max(1, Number(process.env.E2E_UPLOAD_MAX_CONCURRENT) || 2),
+    ippSlugUrl: process.env.E2E_IPP_SLUG_URL?.replace(/\/+$/, '')
   }
 }
 

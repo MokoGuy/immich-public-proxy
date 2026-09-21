@@ -320,6 +320,118 @@ test.describe('guest upload in the browser', () => {
     expect(posts, 'new content must still be uploaded').toContain('upload')
   })
 
+  test('announces milestones to a screen reader, not every byte', async ({ page }) => {
+    /*
+     * The visual bar updates many times a second. A live region echoing it
+     * would be unusable, so the contract is: the file starting, roughly
+     * every 15 seconds during a long transfer, and the final summary.
+     *
+     * "A live region exists" would pass with every announcement deleted, so
+     * this records the actual mutations and asserts both that the milestones
+     * are there AND that the count stays far below the number of progress
+     * events driving the bar.
+     */
+    await page.goto(`${cfg!.ippUrl}/share/${uploadKey}`)
+    await page.evaluate(() => {
+      const w = window as unknown as { __live: string[] }
+      w.__live = []
+      const el = document.getElementById('upload-live')!
+      new MutationObserver(() => {
+        const t = (el.textContent || '').trim()
+        if (t && t !== w.__live[w.__live.length - 1]) w.__live.push(t)
+      }).observe(el, { childList: true, characterData: true, subtree: true })
+    })
+
+    const client = await page.context().newCDPSession(page)
+    await client.send('Network.emulateNetworkConditions', {
+      offline: false, latency: 100, downloadThroughput: 4_000_000, uploadThroughput: 100_000
+    })
+
+    const name = `announce-${Date.now()}.png`
+    const chooser = page.waitForEvent('filechooser')
+    await page.getByRole('button', { name: 'Add photos' }).click()
+    await (await chooser).setFiles([
+      { name, mimeType: 'image/png', buffer: makePng(700, 560, true, 93) }
+    ])
+
+    const row = page.locator('#upload-files li').first()
+    await expect(row).toContainText(/Added|Already uploaded/, { timeout: 120000 })
+    await page.waitForTimeout(500)
+
+    const said = await page.evaluate(() => (window as unknown as { __live: string[] }).__live)
+    expect(said.length, 'nothing was announced at all').toBeGreaterThan(0)
+    expect(said.join(' | '), 'the file starting was never announced').toContain(name)
+    expect(said.join(' | '), 'the outcome was never announced').toMatch(/Finished\./)
+    // ~12s of transfer drives dozens of progress events; a handful of
+    // announcements is the point. Ten is generous and still fails an
+    // implementation that announces on every tick.
+    expect(said.length, `too chatty: ${said.join(' | ')}`).toBeLessThan(10)
+  })
+
+  test('holds a screen wake lock for the duration of the queue', async ({ page }) => {
+    /*
+     * Both mobile platforms suspend a backgrounded page and kill the upload,
+     * and the system releases the lock whenever the document is hidden - so
+     * the lock has to be re-acquired when the page comes back, or the
+     * feature does nothing in exactly the case it exists for.
+     *
+     * Chromium under test has no real wake lock, and asserting a DOM node
+     * would prove nothing, so the API is replaced with a recorder before any
+     * page script runs.
+     */
+    await page.addInitScript(() => {
+      const w = window as unknown as { __wake: string[] }
+      w.__wake = []
+      let hidden = false
+      Object.defineProperty(document, 'visibilityState', { get: () => (hidden ? 'hidden' : 'visible') })
+      ;(window as unknown as { __setHidden: (v: boolean) => void }).__setHidden = (v: boolean) => {
+        hidden = v
+        document.dispatchEvent(new Event('visibilitychange'))
+      }
+      Object.defineProperty(navigator, 'wakeLock', {
+        configurable: true,
+        value: {
+          request: async () => {
+            w.__wake.push('request')
+            return { release: async () => { w.__wake.push('release') } }
+          }
+        }
+      })
+    })
+
+    await page.goto(`${cfg!.ippUrl}/share/${uploadKey}`)
+    const client = await page.context().newCDPSession(page)
+    await client.send('Network.emulateNetworkConditions', {
+      offline: false, latency: 100, downloadThroughput: 4_000_000, uploadThroughput: 100_000
+    })
+
+    const chooser = page.waitForEvent('filechooser')
+    await page.getByRole('button', { name: 'Add photos' }).click()
+    await (await chooser).setFiles([
+      { name: `wake-${Date.now()}.png`, mimeType: 'image/png', buffer: makePng(700, 560, true, 94) }
+    ])
+
+    const row = page.locator('#upload-files li').first()
+    await expect(row).toContainText(/%\s+of/, { timeout: 60000 })
+    expect(
+      await page.evaluate(() => (window as unknown as { __wake: string[] }).__wake),
+      'no wake lock was requested when the upload started'
+    ).toContain('request')
+
+    // Hide and show: the system drops the lock, so it must be taken again.
+    await page.evaluate(() => (window as unknown as { __setHidden: (v: boolean) => void }).__setHidden(true))
+    await page.evaluate(() => (window as unknown as { __setHidden: (v: boolean) => void }).__setHidden(false))
+    await expect.poll(async () =>
+      (await page.evaluate(() => (window as unknown as { __wake: string[] }).__wake))
+        .filter(e => e === 'request').length,
+    { timeout: 15000 }).toBeGreaterThan(1)
+
+    await expect(row).toContainText(/Added|Already uploaded/, { timeout: 120000 })
+    await expect.poll(async () =>
+      (await page.evaluate(() => (window as unknown as { __wake: string[] }).__wake)).includes('release'),
+    { timeout: 15000 }).toBe(true)
+  })
+
   test('minimises to a badge and comes back', async ({ page }) => {
     await page.goto(`${cfg!.ippUrl}/share/${uploadKey}`)
     const chooser = page.waitForEvent('filechooser')

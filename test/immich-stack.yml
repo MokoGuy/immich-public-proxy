@@ -91,5 +91,31 @@ services:
       timeout: 5s
       retries: 30
 
+  # A second proxy, identical but for allowing writes through a slug link.
+  # `requireRandomKey` is on by default and should stay on, but with it on
+  # the submitted key is always the canonical one - so the branch that
+  # invalidates BOTH cache identities is unreachable, and a test for it would
+  # pass without ever executing the code it claims to cover.
+  ipp-slug:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    environment:
+      IMMICH_URL: http://immich:2283
+      CONFIG: >-
+        {"ipp":{"showHomePage":false,"allowDownload":1,
+        "upload":{"enabled":true,"maxFileSizeMb":2,"maxConcurrent":2,
+        "requireRandomKey":false}}}
+    ports:
+      - '127.0.0.1:3001:3000'
+    depends_on:
+      immich:
+        condition: service_healthy
+    healthcheck:
+      test: ['CMD-SHELL', 'node -e "fetch(\"http://localhost:3000/share/healthcheck\").then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"']
+      interval: 2s
+      timeout: 5s
+      retries: 30
+
 volumes:
   upload:

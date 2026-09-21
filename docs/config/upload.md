@@ -436,6 +436,223 @@ unusable. A separate visually-hidden `role="status"` node announces milestones
 only — the file starting, roughly every 15 seconds during a long transfer, the
 wait for confirmation, and the final summary.
 
+That contract is tested rather than asserted: a browser test records the live
+region's actual mutations during a throttled upload and requires both the
+milestones AND fewer than ten announcements across a transfer that drives
+dozens of progress events. It fails on a silent implementation and on a
+chatty one.
+
+### What the tests pin down
+
+Several claims here are only worth making because something fails when they
+stop being true. Each of these was verified by removing the behaviour and
+watching the test go red:
+
+| Claim | Broken by | Caught by |
+|---|---|---|
+| Size cap applies mid-stream | never checking bytes while reading | a body that exceeds the cap and then never ends — a reply can only arrive if the server stopped reading |
+| Both cache identities invalidated | dropping only the submitted key | a slug upload, then requesting the new thumbnail by the canonical key |
+| Milestones, not every byte | announcing on each progress event | counting live-region mutations |
+| Wake lock held and re-acquired | removing the request | replacing `navigator.wakeLock` with a recorder, and hiding/showing the page |
+
+The cache-identity test needs a second proxy with `requireRandomKey: false`
+(`ipp-slug` in `test/immich-stack.yml`). With the default on — which is the
+right default — a slug cannot write at all, so the submitted and canonical
+keys are always identical and the branch is never executed. A test against
+the main proxy would pass while covering nothing.
+
+## Upstream compatibility: what this depends on
+
+Two dependencies worth knowing about, because they are the ones most likely
+to break on an Immich upgrade:
+
+- **Album enumeration goes through `/api/timeline/buckets` and
+  `/api/timeline/bucket`.** Immich accepts shared-link authentication on both,
+  but marks them **internal** — they are not stable public API. IPP uses them
+  because Immich 3.0 removed album assets from `AlbumResponseDto`, and the
+  Immich web client does the same thing. The e2e suite's own helper reads
+  albums through `POST /api/search/metadata` instead, so a green helper does
+  **not** prove the gallery path still works. The tests that load a gallery
+  page and assert on its contents are what cover it.
+- **`POST /api/search/metadata` with a flat `albumIds`** is deprecated since
+  Immich 3.2.0 in favour of structured filters. Still accepted at 3.2.2; it
+  will need adapting.
+
+Running an ephemeral Immich pinned to one version would make these break
+loudly and on purpose rather than silently in production — see below.
+
+## What a visitor sees
+
+The upload experience follows Immich's own upload panel
+(`web/src/routes/UploadPanel.svelte`): a card floating above the page, one row
+per file carrying a state icon and a progress bar, and a minimised badge with
+the count. Someone who uses Immich should not have to learn a second idiom for
+a link Immich gave them.
+
+Two deliberate departures. Immich pins a ~324 px card bottom-right, which is
+cramped on a 412 px phone — here it is a full-width sheet at the bottom below
+600 px, where a thumb already is, and the floating card above that. And Immich
+exposes an upload-concurrency control, which is an operator setting, not
+something to put in front of an anonymous visitor.
+
+Being `position: fixed` is load-bearing beyond looks: the panel never changes
+the gallery's layout, so the virtualiser — which only recomputes on a width
+change — has nothing to reconcile.
+
+### Skipping what is already there
+
+Before sending, the browser hashes the file and asks whether the owner
+already holds those bytes. If so, nothing is transferred.
+
+This matters most on the files it costs most to check: skipping a
+five-minute video upload pays for a second of hashing many times over, while
+on a 2 MB photo both are imperceptible.
+
+The mechanism is Immich's `x-immich-checksum` header on the upload route.
+Its `AssetUploadInterceptor` answers `duplicate` **before** the file
+interceptor runs, so the body is never read — one round trip, no media bytes.
+The dedicated endpoint for this, `POST /assets/bulk-upload-check`, is not an
+option: unlike the upload route it carries no `sharedLink: true`, so a share
+key gets `403`. Verified against Immich 3.2.2.
+
+The digest is SHA-1 because that is what Immich compares. It is a **content
+fingerprint for duplicate detection, not a security primitive** — SHA-1 is
+unsuitable for the latter, and nothing here relies on it being.
+
+Hashing uses the browser's own `crypto.subtle.digest`. That has no
+incremental API, so the file is buffered whole: on a large video that is a
+real allocation, and on a loaded phone it can fail. A hand-written streaming
+digest would avoid it, and was written and tested — then removed. Maintaining
+our own cryptographic primitive is not worth it for a duplicate check,
+however well tested.
+
+**Every failure falls through to an ordinary upload**: plain HTTP (WebCrypto
+needs a secure context), a failed allocation, a check that errors. The
+duplicate is still caught by Immich, just after the transfer — which is the
+behaviour that existed before this. A broken check must never stop a file
+being sent.
+
+**The answer is confined to this share.** Immich looks a checksum up across
+the owner's *entire library*, so an unrestricted answer would let a link
+holder test whether the owner has any given file — including files too large
+or of a type an upload would have refused, and **without possessing the bytes
+at all**, which a catalogue of hashes makes cheap.
+
+That is genuinely wider than what an ordinary upload discloses, so a positive
+answer is only returned when the asset is already in the shared album — which
+the visitor can see by scrolling the gallery. The response carries no asset
+id: knowing "yes" is the point, knowing which row is not.
+
+The cost of that restriction: a photo the owner holds elsewhere gets
+re-uploaded. It would not have been added to the album anyway — Immich
+deduplicates it without filing it — so the loss is bytes, not an outcome.
+
+Checks share the upload concurrency budget and are cancelled when the visitor
+disconnects.
+
+**A check that cannot answer is not a miss.** The response carries
+`checked: true|false`, and the server logs — at most once a minute, with
+nothing visitor-supplied in it — when the check is unavailable. Without that
+distinction, a pre-check broken by an Immich upgrade would look exactly like
+a long run of genuine misses and could go unnoticed indefinitely. Uploads
+continue regardless; only the optimisation is lost.
+
+### Progress
+
+Transfer progress comes from `XMLHttpRequest`, because `fetch()` reports
+nothing about how much of a request body has gone out. A `ReadableStream`
+request body does not solve it either: it counts bytes consumed into the
+browser's buffers rather than bytes on the wire, and stable iOS Safari does
+not support it at all.
+
+Each row shows `22% of 150 MB · 119 KB/s · 9s left`. The rate is a rolling
+five-second estimate, so it tracks reality instead of averaging away a stalled
+connection. On a phone sending a large video, a file counter alone cannot say
+whether anything is moving.
+
+The figures sit above the bar rather than inside it, as Immich writes them:
+Immich's fill is a light accent on a dark track, so no single text colour
+reads on both halves.
+
+A **screen wake lock is requested** while uploads are in flight — the same
+thing Immich's panel does — because both mobile platforms suspend a
+backgrounded page and kill the upload.
+
+Support is narrower than the rest of this feature: Safari iOS 16.4+, Chrome
+Android 152+, secure context only. And the system **releases the lock
+whenever the document becomes hidden**, so it is re-acquired on
+`visibilitychange` — without that, glancing at another app returns you to an
+upload with no lock, which is the usual way this API is got wrong.
+
+It remains a request, not a guarantee: unsupported, denied, or released and
+not regained. That is why the panel also says to keep the page open, and why
+nothing here promises an upload survives being backgrounded.
+
+### States
+
+| State | Shown as |
+|---|---|
+| Waiting | Outline circle, "Waiting" |
+| Sending | Spinner, bar, percentage / size / rate / ETA |
+| Sent, not confirmed | Pulsing full bar, "Sent — waiting for the photo server…" |
+| Added | Blue check |
+| Already uploaded | Amber alert, "Already uploaded — skipped" |
+| Failed | Red alert, the reason, and a retry button |
+| Not attempted | Outline circle, "Not attempted" |
+
+The bar never sits at a solid 100 %: between the last byte leaving the browser
+and Immich accepting the asset there is a real wait, and calling that "added"
+is a claim that gets found out on the next page load.
+
+**Duplicates are not failures.** Immich deduplicates by checksum across the
+owner's whole library — not per album — and does not file a duplicate into the
+album, so the wording is "already uploaded", not "already in this album".
+
+### When an upload fails
+
+"Upload failed" is useless: retrying, picking a smaller file and asking the
+album owner are three different next steps. So failures name the file and the
+cause.
+
+**Two kinds of failure, answered differently on purpose.** A share that does
+not resolve — wrong key, missing password — gets the generic empty response,
+so probing for valid links learns nothing. Once a share *has* resolved, the
+visitor demonstrably holds a working link and can already see the gallery;
+telling them why the upload was refused leaks nothing new.
+
+| Situation | Status | Row reads |
+|---|---|---|
+| Unknown key | `404`, empty | (the gallery never loaded) |
+| Uploads not enabled | `403 not-allowed` | This link no longer accepts uploads |
+| Link expired | `403 expired` | This link has expired |
+| Album at its ceiling | `403 album-full` | The album is full |
+| Over the size cap | `413 too-large` | Larger than 200 MB |
+| Not a photo or video | `400 not-media` | Not a photo or video |
+| Empty file | `400 empty` | File is empty |
+| Too many at once | `503 busy` | (held and retried after `Retry-After`) |
+| Immich refused it | `502 upstream` | The photo server refused it |
+| Stopped mid-transfer | — | Stopped — may have been added |
+
+Size and emptiness are caught **in the browser, before a byte is sent**.
+Uploading 300 MB over a phone connection and only then being told it was too
+big is the kind of thing that makes people give up.
+
+A refusal about the **link** rather than the file — expired, album full,
+uploads disabled — marks the rest of the queue "not attempted" instead of
+marching through it collecting the same refusal.
+
+**Stopping is not rolling back.** An aborted upload may already have reached
+Immich with only the response lost, so the row says "may have been added"
+rather than guessing. Retrying is safe regardless: Immich deduplicates by
+content.
+
+### Accessibility
+
+The bar updates many times a second; a live region echoing it would be
+unusable. A separate visually-hidden `role="status"` node announces milestones
+only — the file starting, roughly every 15 seconds during a long transfer, the
+wait for confirmation, and the final summary.
+
 
 ## Licence obligation (AGPL-3.0 section 13)
 

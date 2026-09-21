@@ -325,6 +325,51 @@ run('guest upload against a live Immich', () => {
       expect((await fx.albumAssetIds(albumId)).length).toBe(before)
     }, 120000)
 
+    sizeIt('refuses an oversize upload BEFORE the body has finished', async () => {
+      /*
+       * "It was refused" is not the claim; the claim is that the cap is
+       * enforced mid-stream, so a body that never ends cannot push bytes
+       * through indefinitely. This sends past the cap and then deliberately
+       * withholds the rest: a response can only arrive if the server stopped
+       * reading rather than waiting for EOF.
+       */
+      const max = (c.maxFileMb as number) * 1024 * 1024
+      const payload = makePngOfAtLeast(max + 512 * 1024)
+      let released: (() => void) | null = null
+      const stalled = new Promise<void>(resolve => { released = resolve })
+      let sentAll = false
+
+      const body = new ReadableStream<Uint8Array>({
+        async pull (controller) {
+          if (!sentAll) {
+            controller.enqueue(new Uint8Array(payload))
+            sentAll = true
+            return
+          }
+          // Past the cap, and now silent. Never closes on its own.
+          await stalled
+          controller.close()
+        }
+      })
+
+      const res = await fetch(`${c.ippUrl}/share/${uploadKey}/upload`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'image/png',
+          'X-IPP-Filename': 'stalled.png',
+          'X-IPP-Created-At': CREATED_AT
+        },
+        body,
+        duplex: 'half'
+      } as RequestInit & { duplex: 'half' })
+
+      // Reaching here at all is the assertion: the request body was never
+      // completed, so this response was produced mid-stream.
+      expect(sentAll, 'the payload was not even sent').toBe(true)
+      expect([413, 502]).toContain(res.status)
+      released?.()
+    }, 120000)
+
     it('keeps serving after a rejection, on a reused connection', async () => {
       // An early rejection answers without reading the body. If that poisons
       // keep-alive, the next upload on the same connection dies - which is
@@ -343,6 +388,57 @@ run('guest upload against a live Immich', () => {
         expect(accepted.status).toBe(200)
         fx.track((await accepted.json() as { id: string }).id)
       }
+    }, 120000)
+  })
+
+  describe('cache identities', () => {
+    const slugIt = c.ippSlugUrl ? it : it.skip
+
+    slugIt('invalidates BOTH the slug and the canonical view after a slug upload', async () => {
+      /*
+       * A /s/<slug> gallery renders its thumbnail and metadata URLs from the
+       * CANONICAL key, so the two warm separate 120s cache entries. Dropping
+       * only the one we were addressed by refreshes the page and leaves every
+       * new thumbnail 404ing until the TTL expires.
+       *
+       * This needs the second proxy: with requireRandomKey on - the default,
+       * and the right default - a slug cannot write at all, so the submitted
+       * and canonical keys are always the same and this branch is never
+       * executed. A test against the main proxy would pass without covering
+       * anything.
+       */
+      const base = c.ippSlugUrl as string
+      const slug = `zz-ipp-e2e-cache-${Date.now()}`
+      const album = await fx.createAlbum('cache')
+      const link = await fx.createShareLink(album, { allowUpload: true, slug })
+      expect(link.slug).toBe(slug)
+      expect(link.key).not.toBe(slug)
+
+      // Warm both identities.
+      expect((await fetch(`${base}/s/${slug}`)).status).toBe(200)
+      expect((await fetch(`${base}/share/${link.key}`)).status).toBe(200)
+
+      const res = await fetch(`${base}/s/${slug}/upload`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'image/png',
+          'X-IPP-Filename': 'via-slug.png',
+          'X-IPP-Created-At': CREATED_AT
+        },
+        body: new Uint8Array(makePng(80, 60, false, 611))
+      })
+      expect(res.status).toBe(200)
+      const { id } = await res.json() as { id: string }
+      fx.track(id)
+
+      // Well inside the 120s TTL: if the canonical entry were still stale,
+      // resolveSharedAsset would reject this id as "not in share".
+      const served = await eventually(async () =>
+        (await fetch(`${base}/share/photo/${link.key}/${id}`)).status === 200, 30000)
+      expect(served, 'the canonical-key view still had the stale asset list').toBe(true)
+
+      // And the slug gallery shows it too.
+      expect(await (await fetch(`${base}/s/${slug}`)).text()).toContain(id)
     }, 120000)
   })
 
