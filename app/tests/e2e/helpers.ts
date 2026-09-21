@@ -20,6 +20,8 @@ export interface E2EConfig {
   ippUrl: string
   /** The instance's configured ipp.upload.maxFileSizeMb, when known. */
   maxFileMb?: number
+  /** The instance's configured ipp.upload.maxConcurrent. */
+  maxConcurrent: number
 }
 
 export const E2E_PREFIX = 'zz-ipp-e2e'
@@ -40,7 +42,8 @@ export function readConfig (): E2EConfig | null {
     ippUrl: ippUrl.replace(/\/+$/, ''),
     // Guard the upper bound: the size test has to generate maxFileMb + 1
     // megabytes, and nobody wants a 200 MB buffer in a test run.
-    maxFileMb: Number.isFinite(rawMax) && rawMax > 0 && rawMax <= 8 ? rawMax : undefined
+    maxFileMb: Number.isFinite(rawMax) && rawMax > 0 && rawMax <= 8 ? rawMax : undefined,
+    maxConcurrent: Math.max(1, Number(process.env.E2E_UPLOAD_MAX_CONCURRENT) || 2)
   }
 }
 
@@ -210,6 +213,41 @@ export async function uploadToIpp (
     init.body = new Uint8Array(body)
   }
   return fetch(`${cfg.ippUrl}${sharePath}/upload`, init)
+}
+
+/**
+ * Upload a body that dribbles out over time, so the server genuinely holds
+ * its admission slot for a known duration. A buffer on loopback finishes too
+ * fast for concurrency to be observable at all.
+ */
+export function uploadSlowToIpp (
+  cfg: E2EConfig,
+  sharePath: string,
+  body: Buffer,
+  opts: { chunks?: number, delayMs?: number } & UploadHeaders = {}
+): Promise<Response> {
+  const chunks = opts.chunks ?? 8
+  const delayMs = opts.delayMs ?? 250
+  const size = Math.ceil(body.length / chunks)
+  let sent = 0
+
+  const stream = new ReadableStream<Uint8Array>({
+    async pull (controller) {
+      if (sent >= body.length) { controller.close(); return }
+      await new Promise(resolve => setTimeout(resolve, delayMs))
+      controller.enqueue(new Uint8Array(body.subarray(sent, sent + size)))
+      sent += size
+    }
+  })
+
+  const h: Record<string, string> = { 'Content-Type': opts.contentType ?? 'image/png' }
+  if (opts.filename !== undefined) h['X-IPP-Filename'] = encodeURIComponent(opts.filename)
+  if (opts.createdAt !== undefined) h['X-IPP-Created-At'] = opts.createdAt
+  if (opts.cookie) h.Cookie = opts.cookie
+
+  return fetch(`${cfg.ippUrl}${sharePath}/upload`, {
+    method: 'POST', headers: h, body: stream, duplex: 'half'
+  } as RequestInit & { duplex: 'half' })
 }
 
 /** Unlock a password-protected share and return the cookie header to replay. */

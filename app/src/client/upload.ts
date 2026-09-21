@@ -1,191 +1,371 @@
-// Guest upload client.
+// Guest upload client: queue, panel rendering and announcements.
 //
-// Deliberately NOT a form post. Each file goes up as its own request with the
-// raw file as the body, so the server can construct every Immich field itself
-// (see src/stream/upload.ts for why that matters). Files go one at a time:
-// the server caps concurrency anyway, and a home upload link is far more
-// likely to be bandwidth-bound than round-trip-bound.
+// Files go up one at a time. The server caps how many it will relay anyway,
+// and a home link is bandwidth-bound long before it is round-trip-bound, so
+// parallelism would only make every file finish later.
 
 import { state } from './state.js'
+import {
+  UploadOutcome,
+  UploadProgress,
+  acquireWakeLock,
+  releaseWakeLock,
+  uploadFile
+} from './upload-request.js'
 
-interface UploadTarget {
-  path: string
-  maxBytes: number
-}
+type ItemState = 'waiting' | 'sending' | 'confirming' | 'done' | 'duplicate' | 'failed' | 'skipped'
 
-/** Per-file outcome, so the summary can name what failed and why. */
-interface FileResult {
-  name: string
-  ok: boolean
+interface Item {
+  file: File
+  state: ItemState
+  progress?: UploadProgress
   reason?: string
+  el?: HTMLLIElement
 }
 
-let target: UploadTarget | null = null
-let busy = false
+interface Target { path: string, maxBytes: number }
 
-function statusEl (): HTMLElement | null {
-  return document.getElementById('upload-status')
+const ICON = {
+  pending: 'M12,20A8,8 0 0,1 4,12A8,8 0 0,1 12,4A8,8 0 0,1 20,12A8,8 0 0,1 12,20M12,2A10,10 0 0,0 2,12A10,10 0 0,0 12,22A10,10 0 0,0 22,12A10,10 0 0,0 12,2Z',
+  sending: 'M12,4V2A10,10 0 0,0 2,12H4A8,8 0 0,1 12,4Z',
+  done: 'M12,2C6.5,2 2,6.5 2,12S6.5,22 12,22 22,17.5 22,12 17.5,2 12,2M10,17L5,12L6.41,10.59L10,14.17L17.59,6.58L19,8L10,17Z',
+  warn: 'M13,13H11V7H13M13,17H11V15H13M12,2A10,10 0 0,0 2,12A10,10 0 0,0 12,22A10,10 0 0,0 22,12A10,10 0 0,0 22,12A10,10 0 0,0 12,2Z',
+  retry: 'M12,4C14.1,4 16.1,4.8 17.6,6.3C20.7,9.4 20.7,14.5 17.6,17.6C15.8,19.5 13.3,20.2 10.9,19.9L11.4,17.9C13.1,18.1 14.9,17.5 16.2,16.2C18.5,13.9 18.5,10.1 16.2,7.7C15.1,6.6 13.5,6 12,6V10.6L7,5.6L12,0.6V4M6.3,17.6C3.7,15 3.4,11 5.1,8.1L6.6,9.6C5.5,11.6 5.8,14.2 7.5,15.9C8,16.4 8.6,16.8 9.3,17.1L8.7,19.1C7.8,18.8 6.9,18.2 6.3,17.6Z'
 }
 
-function setStatus (message: string, isError = false): void {
-  const el = statusEl()
-  if (!el) return
-  el.textContent = message
-  el.classList.toggle('upload-error', isError)
-  el.hidden = !message
+let target: Target | null = null
+const queue: Item[] = []
+let running = false
+let stopped = false
+let controller: AbortController | null = null
+let lastAnnounce = 0
+
+/* ------------------------------------------------------------ formatting */
+
+function humanBytes (n: number): string {
+  if (n >= 1073741824) return `${(n / 1073741824).toFixed(1)} GB`
+  if (n >= 1048576) return `${Math.round(n / 1048576)} MB`
+  return `${Math.max(1, Math.round(n / 1024))} KB`
 }
 
-function humanSize (bytes: number): string {
-  return bytes >= 1048576
-    ? `${Math.round(bytes / 1048576)} MB`
-    : `${Math.max(1, Math.round(bytes / 1024))} KB`
+function humanEta (seconds: number | null): string {
+  if (seconds === null || !isFinite(seconds)) return ''
+  if (seconds < 60) return `${seconds}s left`
+  return `${Math.round(seconds / 60)} min left`
 }
 
 /**
- * Turn a server reason code into something a visitor can act on.
- *
- * "Upload failed" tells someone nothing about whether to retry, pick a
- * smaller file, or go and ask whoever shared the album. Each of those is a
- * different next step, so each gets its own sentence.
+ * Turn a server reason code into something a visitor can act on. "Upload
+ * failed" gives no basis for choosing between retrying, picking a smaller
+ * file, and going to ask whoever shared the album.
  */
-function explain (reason: string | undefined, name: string, maxBytes: number): string {
-  switch (reason) {
-    case 'too-large': return `${name} is larger than ${humanSize(maxBytes)}`
-    case 'not-media': return `${name} is not a photo or video`
-    case 'empty': return `${name} is empty`
-    case 'bad-date': return `${name} has no usable date`
-    case 'album-full': return 'The album is full — ask whoever shared it to make room'
+function explain (item: Item): string {
+  switch (item.reason) {
+    case 'too-large': return `Larger than ${humanBytes(target?.maxBytes ?? 0)}`
+    case 'not-media': return 'Not a photo or video'
+    case 'empty': return 'File is empty'
+    case 'bad-date': return 'No usable date'
+    case 'album-full': return 'The album is full'
     case 'expired': return 'This link has expired'
     case 'not-allowed':
     case 'disabled': return 'This link no longer accepts uploads'
-    case 'busy': return 'Too many uploads at once — try again in a few seconds'
-    case 'upstream': return `The photo server would not accept ${name}`
-    default: return `${name} could not be uploaded`
+    case 'busy': return 'Server busy'
+    case 'network': return 'Connection lost'
+    case 'upstream': return 'The photo server refused it'
+    case 'interrupted': return 'Stopped — may have been added'
+    default: return 'Could not be uploaded'
+  }
+}
+
+/* --------------------------------------------------------------- elements */
+
+const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T | null
+
+function svg (path: string, cls: string): string {
+  return `<svg class="${cls}" viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><path fill="currentColor" d="${path}"/></svg>`
+}
+
+function iconFor (item: Item): string {
+  switch (item.state) {
+    case 'waiting': return svg(ICON.pending, 'upload-ico upload-ico-idle')
+    case 'sending':
+    case 'confirming': return svg(ICON.sending, 'upload-ico upload-ico-busy')
+    case 'done': return svg(ICON.done, 'upload-ico upload-ico-ok')
+    case 'duplicate': return svg(ICON.warn, 'upload-ico upload-ico-warn')
+    case 'skipped': return svg(ICON.pending, 'upload-ico upload-ico-idle')
+    default: return svg(ICON.warn, 'upload-ico upload-ico-bad')
   }
 }
 
 /**
- * Send one file.
+ * Status line under the filename.
  *
- * Size and emptiness are checked here, before a byte leaves the browser.
- * Uploading 300 MB over a phone connection only to be told it was too big is
- * the kind of thing that makes people give up.
+ * The figures live here rather than inside the bar, as Immich writes them.
+ * Immich's fill is a light accent on a dark track, so no single text colour
+ * reads on both halves, and blending tricks break the moment a filter creates
+ * a stacking context. A themed line above the bar always reads.
  */
-async function sendFile (file: File): Promise<FileResult> {
-  const name = file.name || 'file'
-  if (!target) return { name, ok: false }
-  if (file.size === 0) return { name, ok: false, reason: 'empty' }
-  if (file.size > target.maxBytes) return { name, ok: false, reason: 'too-large' }
-
-  const res = await fetch(target.path, {
-    method: 'POST',
-    body: file,
-    headers: {
-      'Content-Type': file.type || 'application/octet-stream',
-      'X-IPP-Filename': encodeURIComponent(name),
-      'X-IPP-Created-At': new Date(file.lastModified || Date.now()).toISOString()
+function detailFor (item: Item): string {
+  switch (item.state) {
+    case 'waiting': return 'Waiting'
+    case 'sending': {
+      const p = item.progress
+      if (!p) return 'Starting…'
+      const pct = p.total ? Math.min(100, Math.round((p.loaded / p.total) * 100)) : 0
+      const rate = p.bytesPerSecond > 0 ? ` · ${humanBytes(p.bytesPerSecond)}/s` : ''
+      const eta = humanEta(p.etaSeconds)
+      return `${pct}% of ${humanBytes(p.total)}${rate}${eta ? ` · ${eta}` : ''}`
     }
+    case 'confirming': return 'Sent — waiting for the photo server…'
+    case 'done': return 'Added'
+    // Immich deduplicates by checksum across the owner's whole library, not
+    // per album, and a duplicate is not filed into the album. Saying "already
+    // in this album" would be wrong whenever the owner happens to have the
+    // photo somewhere else.
+    case 'duplicate': return 'Already uploaded — skipped'
+    case 'skipped': return 'Not attempted'
+    case 'failed': return explain(item)
+    default: return ''
+  }
+}
+
+function renderItem (item: Item): void {
+  if (!item.el) return
+  const p = item.progress
+  const pct = p && p.total ? Math.min(100, Math.round((p.loaded / p.total) * 100)) : 0
+  const showBar = item.state === 'sending' || item.state === 'confirming'
+
+  item.el.className = `upload-item upload-item-${item.state}`
+  item.el.innerHTML =
+    `<div class="upload-item-head">
+       ${iconFor(item)}
+       <span class="upload-name">${escapeHtml(item.file.name || 'file')}</span>
+       ${item.state === 'failed' ? `<button type="button" class="upload-icon-btn upload-retry" aria-label="Retry ${escapeHtml(item.file.name)}">${svg(ICON.retry, '')}</button>` : ''}
+     </div>` +
+    (showBar
+      ? `<div class="upload-bar${item.state === 'confirming' ? ' upload-bar-pending' : ''}">
+           <div class="upload-bar-fill" style="width:${item.state === 'confirming' ? 100 : pct}%"></div>
+         </div>`
+      : '') +
+    (detailFor(item) ? `<p class="upload-detail">${escapeHtml(detailFor(item))}</p>` : '')
+
+  const retry = item.el.querySelector('.upload-retry')
+  retry?.addEventListener('click', () => {
+    item.state = 'waiting'
+    item.reason = undefined
+    renderItem(item)
+    run().catch(() => { /* every failure path already lands in the panel */ })
   })
-  if (res.ok) return { name, ok: true }
-
-  let reason: string | undefined
-  try {
-    reason = (await res.json() as { reason?: string }).reason
-  } catch (e) { /* no body; fall back to the generic message */ }
-  return { name, ok: false, reason }
 }
 
-/**
- * `files` must be a plain array, never the input's live FileList: clearing
- * `input.value` (which we do so the same file can be picked twice) empties
- * that list in place, and this function awaits between items. Snapshot first,
- * or every upload after the first one reads `undefined`.
- *
- * Caught only by driving a real browser - the request-level tests upload one
- * file at a time and never touch the input element.
- */
-async function handleFiles (files: File[]): Promise<void> {
-  if (!target || busy || !files.length) return
-  busy = true
-  const total = files.length
-  const results: FileResult[] = []
+function escapeHtml (s: string): string {
+  return s.replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c] as string))
+}
 
-  for (let i = 0; i < total; i++) {
-    setStatus(total === 1
-      ? `Uploading ${files[i].name || 'file'}…`
-      : `Uploading ${i + 1} of ${total}…`)
-    try {
-      results.push(await sendFile(files[i]))
-    } catch (e) {
-      results.push({ name: files[i].name || 'file', ok: false })
+/* ----------------------------------------------------------------- panel */
+
+function counts () {
+  return {
+    done: queue.filter(i => i.state === 'done').length,
+    dup: queue.filter(i => i.state === 'duplicate').length,
+    bad: queue.filter(i => i.state === 'failed').length,
+    left: queue.filter(i => i.state === 'waiting' || i.state === 'sending' || i.state === 'confirming').length
+  }
+}
+
+function renderPanel (): void {
+  const panel = $('upload-panel')
+  const list = $<HTMLUListElement>('upload-files')
+  if (!panel || !list) return
+
+  for (const item of queue) {
+    if (!item.el) {
+      item.el = document.createElement('li')
+      list.appendChild(item.el)
+      renderItem(item)
     }
   }
 
-  busy = false
-  report(results)
+  const c = counts()
+  const head = $('upload-heading')
+  if (head) head.textContent = c.left ? `Uploading ${queue.length - c.left + 1} of ${queue.length}` : 'Uploads'
+
+  const line = $('upload-counts')
+  if (line) {
+    const parts: string[] = []
+    if (c.done) parts.push(`<span class="c-ok">${c.done} added</span>`)
+    if (c.dup) parts.push(`<span class="c-warn">${c.dup} already uploaded</span>`)
+    if (c.bad) parts.push(`<span class="c-bad">${c.bad} failed</span>`)
+    if (c.left) parts.push(`${c.left} to go`)
+    line.innerHTML = parts.join(' · ')
+  }
+
+  const finished = c.left === 0
+  $('upload-stop')!.hidden = finished
+  $('upload-refresh')!.hidden = !(finished && (c.done || c.dup))
+  $('upload-close')!.hidden = !finished
+  $('upload-hint')!.hidden = finished
+
+  const badgeCount = $('upload-badge-count')
+  if (badgeCount) badgeCount.textContent = String(c.left || c.bad)
+  const badge = $('upload-badge')
+  if (badge) badge.classList.toggle('has-errors', c.left === 0 && c.bad > 0)
+}
+
+function show (open: boolean): void {
+  const panel = $('upload-panel')
+  const badge = $('upload-badge')
+  if (!panel || !badge) return
+  panel.hidden = !open
+  badge.hidden = open || queue.length === 0
 }
 
 /**
- * Say what happened, per file. A bare count hides the useful part: which
- * photo did not make it, and what to do about it.
+ * Announce milestones, not bytes. The bar is the visual channel; a live
+ * region that fires on every progress event is unusable.
  */
-function report (results: FileResult[]): void {
-  const maxBytes = target?.maxBytes ?? 0
-  const done = results.filter(r => r.ok).length
-  const failed = results.filter(r => !r.ok)
+function announce (message: string, force = false): void {
+  const el = $('upload-live')
+  if (!el) return
+  const now = Date.now()
+  if (!force && now - lastAnnounce < 15000) return
+  lastAnnounce = now
+  el.textContent = message
+}
 
-  if (!failed.length) {
-    setStatus(`Added ${done} ${done === 1 ? 'photo' : 'photos'}. Refreshing…`)
-    // The gallery is served no-store and the server dropped its cached share
-    // on success, so a reload is guaranteed to show the new items. Inserting
-    // them into the virtualised grid in place would be nicer, and is the
-    // obvious follow-up - it is just a lot more moving parts than a reload.
-    window.setTimeout(() => window.location.reload(), 600)
-    return
+/* ----------------------------------------------------------------- queue */
+
+async function run (): Promise<void> {
+  if (running || !target) return
+  running = true
+  stopped = false
+  await acquireWakeLock()
+
+  for (;;) {
+    const item = queue.find(i => i.state === 'waiting')
+    if (!item || stopped) break
+
+    // Cheap client-side rejections: never spend a phone's uplink on a file
+    // the server is certain to refuse.
+    if (item.file.size === 0) { fail(item, 'empty'); continue }
+    if (item.file.size > target.maxBytes) { fail(item, 'too-large'); continue }
+
+    item.state = 'sending'
+    item.progress = undefined
+    renderItem(item); renderPanel()
+    announce(`Uploading ${item.file.name}`, true)
+
+    controller = new AbortController()
+    const outcome: UploadOutcome = await uploadFile({
+      url: target.path,
+      file: item.file,
+      signal: controller.signal,
+      onPhase: (phase) => {
+        item.state = phase === 'confirming' ? 'confirming' : 'sending'
+        renderItem(item)
+        if (phase === 'confirming') announce('Sent, waiting for the photo server')
+      },
+      onProgress: (p) => {
+        item.progress = p
+        renderItem(item)
+        const pct = p.total ? Math.round((p.loaded / p.total) * 100) : 0
+        if (pct >= 25) announce(`${item.file.name}, ${pct} percent`)
+      }
+    })
+    controller = null
+
+    if (outcome.ok) {
+      item.state = outcome.status === 'duplicate' ? 'duplicate' : 'done'
+      item.progress = undefined
+    } else if (outcome.aborted) {
+      // The bytes may already have reached Immich; the response is simply
+      // lost. Saying "failed" would be a guess, and re-sending silently would
+      // be a worse one.
+      item.state = 'failed'
+      item.reason = 'interrupted'
+    } else if (outcome.reason === 'busy') {
+      // Hold this file at the head and wait the server out rather than
+      // marching through the queue collecting the same refusal.
+      item.state = 'waiting'
+      renderItem(item); renderPanel()
+      await sleep(outcome.retryAfterMs ?? 5000)
+      continue
+    } else {
+      fail(item, outcome.reason)
+      // A refusal about the LINK, not the file: nothing further can succeed.
+      if (['album-full', 'expired', 'not-allowed', 'disabled'].includes(outcome.reason || '')) {
+        for (const rest of queue) if (rest.state === 'waiting') rest.state = 'skipped'
+      }
+    }
+    renderItem(item); renderPanel()
   }
 
-  // Three reasons at most: beyond that the message stops being readable and a
-  // count serves better.
-  const detail = failed.slice(0, 3).map(r => explain(r.reason, r.name, maxBytes))
-  if (failed.length > 3) detail.push(`and ${failed.length - 3} more`)
+  if (stopped) for (const rest of queue) if (rest.state === 'waiting') rest.state = 'skipped'
+  queue.forEach(renderItem)
+  renderPanel()
+  running = false
+  await releaseWakeLock()
 
-  setStatus(done
-    ? `Added ${done}. Not added: ${detail.join('; ')}`
-    : detail.join('; '), true)
-
-  // Something did land, so refresh to show it - but leave the message up long
-  // enough to be read first.
-  if (done) window.setTimeout(() => window.location.reload(), 4000)
+  const c = counts()
+  announce(c.bad
+    ? `Finished. ${c.done} added, ${c.bad} failed.`
+    : `Finished. ${c.done} added.`, true)
 }
+
+function fail (item: Item, reason?: string): void {
+  item.state = 'failed'
+  item.reason = reason
+  item.progress = undefined
+  renderItem(item); renderPanel()
+}
+
+const sleep = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms))
+
+/* ----------------------------------------------------------------- setup */
 
 export function setupUpload (path?: string, maxBytes?: number): void {
   if (!path) return
   target = { path, maxBytes: maxBytes || Number.MAX_SAFE_INTEGER }
 
-  const input = document.getElementById('upload-input') as HTMLInputElement | null
-  const button = document.getElementById('upload-open')
-  if (!input || !button) return
+  const input = $<HTMLInputElement>('upload-input')
+  const open = $('upload-open')
+  if (!input || !open) return
 
-  button.addEventListener('click', () => input.click())
+  const add = (files: File[]) => {
+    if (!files.length) return
+    for (const file of files) queue.push({ file, state: 'waiting' })
+    show(true)
+    renderPanel()
+    run().catch(() => { /* every failure path already lands in the panel */ })
+  }
+
+  open.addEventListener('click', () => input.click())
   input.addEventListener('change', () => {
-    // Snapshot BEFORE resetting the input - see handleFiles.
+    // Snapshot BEFORE resetting the input: clearing `value` empties the live
+    // FileList, and this queue outlives the event handler.
     const picked = input.files ? Array.from(input.files) : []
     input.value = ''
-    if (picked.length) handleFiles(picked).catch(() => setStatus('Upload failed.', true))
+    add(picked)
   })
 
-  // Drag-and-drop onto the gallery, for the desktop case.
-  const dropZone = state.container || document.body
-  dropZone.addEventListener('dragover', (e) => {
-    e.preventDefault()
-    dropZone.classList.add('upload-dragover')
+  $('upload-minimise')?.addEventListener('click', () => show(false))
+  $('upload-badge')?.addEventListener('click', () => { show(true); $('upload-heading')?.focus() })
+  $('upload-close')?.addEventListener('click', () => {
+    queue.length = 0
+    const list = $('upload-files'); if (list) list.innerHTML = ''
+    show(false)
+    const badge = $('upload-badge'); if (badge) badge.hidden = true
   })
-  dropZone.addEventListener('dragleave', () => dropZone.classList.remove('upload-dragover'))
-  dropZone.addEventListener('drop', (e) => {
+  $('upload-stop')?.addEventListener('click', () => { stopped = true; controller?.abort() })
+  $('upload-refresh')?.addEventListener('click', () => window.location.reload())
+
+  // Drag-and-drop for desktop; the picker is the path on touch.
+  const drop = state.container || document.body
+  drop.addEventListener('dragover', (e) => { e.preventDefault(); drop.classList.add('upload-dragover') })
+  drop.addEventListener('dragleave', () => drop.classList.remove('upload-dragover'))
+  drop.addEventListener('drop', (e) => {
     e.preventDefault()
-    dropZone.classList.remove('upload-dragover')
-    const dropped = (e as DragEvent).dataTransfer?.files
-    const picked = dropped ? Array.from(dropped) : []
-    if (picked.length) handleFiles(picked).catch(() => setStatus('Upload failed.', true))
+    drop.classList.remove('upload-dragover')
+    add(Array.from((e as DragEvent).dataTransfer?.files || []))
   })
 }

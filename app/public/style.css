@@ -551,35 +551,6 @@ html.ipp-sidebar-open .ipp-sidebar {
   text-align: center;
 }
 
-/* ---- Guest upload (fork: feat/guest-upload) ---- */
-/*
- * The upload control is a peer of the download control, so it shares its
- * rules above rather than carrying a parallel set. A <button> needs its
- * browser chrome removed to match an <a>; everything else - the 44px target,
- * the icon size, the hover treatment - comes from #download-all.
- */
-#upload-open {
-  background: none;
-  border: none;
-  cursor: pointer;
-  font: inherit;
-}
-#upload-status {
-  margin: 0 auto;
-  padding: 0.5rem 1rem;
-  text-align: center;
-  font-size: 0.9rem;
-  opacity: 0.85;
-}
-#upload-status.upload-error {
-  color: #e5737d;
-  opacity: 1;
-}
-#gallery.upload-dragover {
-  outline: 2px dashed currentColor;
-  outline-offset: -8px;
-}
-
 /* ---- AGPL section 13 source offer (fork: feat/guest-upload) ---- */
 #source-offer {
   padding: 1.5rem 1rem 2rem;
@@ -595,4 +566,260 @@ html.ipp-sidebar-open .ipp-sidebar {
 #source-offer a:hover,
 #source-offer a:focus-visible {
   opacity: 1;
+}
+
+/* ==========================================================================
+   Guest upload (fork: feat/guest-upload)
+
+   Visual vocabulary borrowed from Immich's own upload panel: a card floating
+   above the page, one row per file with a state icon, a filled progress bar
+   with the figures written inside it, and a minimised badge carrying the
+   count. Someone who uses Immich should not have to learn a second idiom for
+   a link Immich gave them.
+
+   Everything uses the --immich-* tokens already defined at the top of this
+   file, so light/dark and the accent colour follow the rest of the page.
+
+   Mobile first: a full-width sheet anchored to the bottom, where a thumb
+   already is. From 600px it becomes the floating card Immich uses. Being
+   `fixed` also means the panel never changes the gallery's layout, so the
+   virtualiser - which only recomputes on a width change - has nothing to
+   reconcile.
+   ========================================================================== */
+
+#upload-open {
+  background: none;
+  border: none;
+  cursor: pointer;
+  font: inherit;
+}
+
+/* ---- Panel shell ---- */
+
+#upload-panel {
+  position: fixed;
+  z-index: 60;
+  inset: auto 0 0 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  max-height: 70vh;
+  padding: 16px;
+  padding-bottom: max(16px, env(safe-area-inset-bottom));
+  background: var(--color-bg);
+  color: var(--color-fg);
+  border-top: 1px solid var(--color-gray);
+  border-radius: 16px 16px 0 0;
+  box-shadow: 0 -8px 32px rgb(0 0 0 / 0.18);
+  font-size: 14px;
+}
+#upload-panel[hidden] { display: none; }
+
+@media (min-width: 600px) {
+  #upload-panel {
+    inset: auto 24px 24px auto;
+    width: 360px;
+    border: 1px solid var(--color-gray);
+    border-radius: 16px;
+    box-shadow: 0 8px 32px rgb(0 0 0 / 0.18);
+  }
+}
+
+.upload-panel-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+#upload-heading {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 500;
+}
+#upload-heading:focus-visible { outline: 2px solid var(--color-primary); outline-offset: 2px; }
+#upload-counts {
+  margin: 2px 0 0;
+  font-size: 12px;
+  opacity: 0.7;
+}
+#upload-counts .c-ok { color: var(--color-primary); opacity: 1; }
+#upload-counts .c-warn { color: #c98a00; opacity: 1; }
+#upload-counts .c-bad { color: #d3454f; opacity: 1; }
+
+.upload-panel-actions { display: flex; gap: 2px; flex: 0 0 auto; }
+
+.upload-icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: none;
+  color: inherit;
+  cursor: pointer;
+  opacity: 0.7;
+  transition: background-color 0.15s, opacity 0.15s;
+}
+.upload-icon-btn:hover,
+.upload-icon-btn:focus-visible {
+  opacity: 1;
+  background-color: color-mix(in srgb, var(--color-fg) 10%, transparent);
+  outline: none;
+}
+
+/* ---- File rows ---- */
+
+#upload-files {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  overflow-y: auto;
+  min-height: 0;
+}
+
+.upload-item {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 10px;
+  border: 1px solid var(--color-gray);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--color-primary) 6%, transparent);
+}
+.upload-item-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.upload-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-size: 13px;
+}
+.upload-detail {
+  margin: 0;
+  font-size: 12px;
+  opacity: 0.7;
+}
+.upload-item-failed .upload-detail { color: #d3454f; opacity: 1; }
+.upload-item-duplicate .upload-detail { color: #c98a00; opacity: 1; }
+
+.upload-ico { flex: 0 0 auto; }
+.upload-ico-idle { opacity: 0.45; }
+.upload-ico-ok { color: var(--color-primary); }
+.upload-ico-warn { color: #c98a00; }
+.upload-ico-bad { color: #d3454f; }
+.upload-ico-busy {
+  color: var(--color-primary);
+  animation: upload-spin 0.9s linear infinite;
+}
+@keyframes upload-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) {
+  .upload-ico-busy { animation: none; }
+}
+
+/* ---- Progress bar: figures written inside, as Immich does ---- */
+
+.upload-bar {
+  height: 6px;
+  border-radius: 3px;
+  overflow: hidden;
+  background: color-mix(in srgb, var(--color-fg) 16%, transparent);
+}
+.upload-bar-fill {
+  height: 100%;
+  background: var(--color-primary);
+  transition: width 0.2s linear;
+}
+/* Body sent, server still deciding: the bar is full but nothing is confirmed,
+   so it pulses rather than sitting at a misleading solid 100%. */
+.upload-bar-pending .upload-bar-fill { animation: upload-pulse 1.4s ease-in-out infinite; }
+@keyframes upload-pulse { 0%, 100% { opacity: 1 } 50% { opacity: 0.4 } }
+@media (prefers-reduced-motion: reduce) {
+  .upload-bar-pending .upload-bar-fill { animation: none; opacity: 0.6; }
+}
+
+/* ---- Footer actions ---- */
+
+#upload-hint {
+  margin: 0;
+  font-size: 11px;
+  opacity: 0.55;
+}
+.upload-panel-foot {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+.upload-text-btn {
+  padding: 8px 14px;
+  min-height: 40px;
+  border: 1px solid var(--color-gray);
+  border-radius: 999px;
+  background: none;
+  color: inherit;
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+.upload-text-btn:hover,
+.upload-text-btn:focus-visible {
+  background-color: color-mix(in srgb, var(--color-fg) 8%, transparent);
+  outline: none;
+}
+.upload-text-btn.upload-primary {
+  background: var(--color-primary);
+  border-color: var(--color-primary);
+  color: var(--color-bg);
+}
+
+/* ---- Minimised badge ---- */
+
+#upload-badge {
+  position: fixed;
+  z-index: 60;
+  right: 16px;
+  bottom: max(16px, env(safe-area-inset-bottom));
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 44px;
+  padding: 0 16px;
+  border: none;
+  border-radius: 999px;
+  background: var(--color-primary);
+  color: var(--color-bg);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+  box-shadow: 0 4px 16px rgb(0 0 0 / 0.25);
+}
+#upload-badge[hidden] { display: none; }
+#upload-badge.has-errors { background: #d3454f; }
+
+/* ---- Drop target ---- */
+
+#gallery.upload-dragover {
+  outline: 2px dashed var(--color-primary);
+  outline-offset: -8px;
+}
+
+/* Available to assistive technology, invisible on screen. */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
 }

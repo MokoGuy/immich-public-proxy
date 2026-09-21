@@ -20,6 +20,7 @@ import {
   makePngOfAtLeast,
   readConfig,
   unlockShare,
+  uploadSlowToIpp,
   uploadToIpp
 } from './helpers'
 
@@ -27,7 +28,7 @@ const cfg = readConfig()
 const run = describe.skipIf(!cfg)
 // `describe.skipIf` still evaluates the suite body at collection time, so the
 // config has to be safe to read even when the suite will not run.
-const c: E2EConfig = cfg ?? { immichUrl: '', apiKey: '', ippUrl: '' }
+const c: E2EConfig = cfg ?? { immichUrl: '', apiKey: '', ippUrl: '', maxConcurrent: 2 }
 
 const CREATED_AT = '2026-01-15T09:30:00.000Z'
 
@@ -196,27 +197,90 @@ run('guest upload against a live Immich', () => {
   })
 
   describe('limits', () => {
-    it('bounds admission rather than queueing unbounded work', async () => {
-      // The route refuses over capacity instead of parking the request. Every
-      // response must therefore be a success or an explicit 503 - never a
-      // timeout, and never a 5xx that is not 503.
+    it('never admits more uploads at once than the configured limit', async () => {
+      /*
+       * The guarantee is a CAP, so a test that merely tolerates "200 or 503"
+       * proves nothing: eight successes satisfy it while the cap is broken.
+       *
+       * This caught a real race. The route checked capacity, then awaited
+       * share resolution, and only reserved the slot afterwards - so every
+       * concurrent caller read the same zero, passed the check together and
+       * all proceeded. The reservation now happens with no await between the
+       * check and the increment.
+       *
+       * Bodies are dribbled out so the server actually holds its slot; a
+       * buffer on loopback completes before concurrency is observable.
+       */
+      /*
+       * A FRESH link, deliberately. The window between the capacity check and
+       * the reservation is share resolution, and the shared fixture link is
+       * already in IPP's 120s cache by the time this test runs - which closes
+       * the window and lets the buggy version pass. Cold resolution is what
+       * makes this test order-independent instead of a trap that only fires
+       * when run alone.
+       */
+      const fresh = await fx.createShareLink(albumId, { allowUpload: true })
+      const burst = 8
+      const payload = makePng(160, 120, true, 300)
       const attempts = await Promise.all(
-        Array.from({ length: 8 }, (_, i) =>
-          uploadToIpp(c, `/share/${uploadKey}`, makePng(200, 150, true, 100 + i), {
-            filename: `burst-${i}.png`,
+        Array.from({ length: burst }, (_, i) =>
+          uploadSlowToIpp(c, `/share/${fresh.key}`, payload, {
+            chunks: 6,
+            delayMs: 200,
+            filename: `burst-${Date.now()}-${i}.png`,
             createdAt: CREATED_AT
           })
         )
       )
+
       const codes = attempts.map(r => r.status)
-      expect(codes.every(s => s === 200 || s === 503)).toBe(true)
-      expect(codes).toContain(200)
+      expect(codes.every(s => s === 200 || s === 503),
+        `unexpected statuses: ${codes.join(',')}`).toBe(true)
+
+      // With a cap of 2 and eight simultaneous slow uploads, most must be
+      // turned away. Every one succeeding means the cap is not being applied.
+      // The invariant is a CAP, so assert the cap - not merely "fewer than
+      // all". With the reservation happening after an await, a handful of
+      // callers slip through the window, which "fewer than all" happily
+      // tolerates. `<= maxConcurrent` is what actually distinguishes the two.
+      const admitted = codes.filter(s => s === 200).length
+      expect(admitted, `${admitted} admitted with a cap of ${c.maxConcurrent}: ${codes.join(',')}`)
+        .toBeLessThanOrEqual(c.maxConcurrent)
+      expect(admitted, 'nothing was admitted at all').toBeGreaterThan(0)
 
       for (const r of attempts) {
         if (r.status === 200) fx.track((await r.json() as { id: string }).id)
-        else expect(r.headers.get('retry-after')).toBeTruthy()
+        else expect(r.headers.get('retry-after'), 'a 503 must say when to come back').toBeTruthy()
       }
-    }, 120000)
+    }, 180000)
+
+    it('surfaces a duplicate as its own outcome, not as a success', async () => {
+      // Immich deduplicates by checksum across the owner's whole library and
+      // does not file the duplicate into the album. Reporting that as "added"
+      // would tell a visitor their photo is in an album it is not in.
+      const bytes = makePng(110, 90, false, 404)
+      const first = await uploadToIpp(c, `/share/${uploadKey}`, bytes, {
+        filename: 'dup-source.png', createdAt: CREATED_AT
+      })
+      expect(first.status).toBe(200)
+      const firstBody = await first.json() as { id: string, status: string }
+      expect(firstBody.status).toBe('created')
+      fx.track(firstBody.id)
+
+      const countAfterFirst = (await fx.albumAssetIds(albumId)).length
+
+      // Same bytes, different name: dedup is on content, not filename.
+      const again = await uploadToIpp(c, `/share/${uploadKey}`, bytes, {
+        filename: 'dup-copy.png', createdAt: CREATED_AT
+      })
+      expect(again.status).toBe(200)
+      const againBody = await again.json() as { id: string, status: string }
+      expect(againBody.status, 'a re-upload of identical bytes must report duplicate').toBe('duplicate')
+      expect(againBody.id).toBe(firstBody.id)
+
+      // And it must not have been counted as a new asset.
+      expect((await fx.albumAssetIds(albumId)).length).toBe(countAfterFirst)
+    }, 90000)
 
     const sizeIt = c.maxFileMb ? it : it.skip
 
@@ -336,7 +400,9 @@ run('guest upload against a live Immich', () => {
     it('offers the source from the gallery itself', async () => {
       const page = await (await fetch(`${c.ippUrl}/share/${uploadKey}`)).text()
       expect(page).toContain('source-offer')
-      expect(page).toMatch(/href="https?:\/\/[^"]+"[^>]*>Source/)
+      // Section 13 wants the source of the version ACTUALLY running, so the
+      // href must carry a concrete ref, not just the repository root.
+      expect(page).toMatch(/href="https?:\/\/[^"]+\/tree\/[^"]+"[^>]*>IPP/)
     }, 30000)
   })
 

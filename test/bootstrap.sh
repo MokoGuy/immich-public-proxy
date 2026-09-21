@@ -25,6 +25,8 @@ IMMICH_URL="${IMMICH_URL:-http://127.0.0.1:2283}"
 IPP_URL="${IPP_URL:-http://127.0.0.1:3000}"
 # Must match ipp.upload.maxFileSizeMb in test/immich-stack.yml.
 UPLOAD_MAX_MB="${UPLOAD_MAX_MB:-2}"
+# Must match ipp.upload.maxConcurrent in test/immich-stack.yml.
+UPLOAD_MAX_CONCURRENT="${UPLOAD_MAX_CONCURRENT:-2}"
 
 EMAIL="e2e@example.test"
 PASSWORD="e2e-password-not-a-secret"
@@ -87,4 +89,5 @@ ${prefix}E2E_IMMICH_URL=$IMMICH_URL
 ${prefix}E2E_IMMICH_API_KEY=$API_KEY
 ${prefix}E2E_IPP_URL=$IPP_URL
 ${prefix}E2E_UPLOAD_MAX_MB=$UPLOAD_MAX_MB
+${prefix}E2E_UPLOAD_MAX_CONCURRENT=$UPLOAD_MAX_CONCURRENT
 EOF

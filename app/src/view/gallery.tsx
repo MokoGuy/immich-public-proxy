@@ -3,6 +3,7 @@ import { ThemeScript } from './theme'
 import { GalleryItem, LightboxConfig, MetadataConfig, GroupByDateMode } from '../shared/types'
 import { ASSET_VERSION } from '../version'
 import { SourceFooter } from './source-footer'
+import { UploadPanel } from './upload-panel'
 import { jsonForInlineScript } from '../utils/text'
 
 export type { GalleryItem, LightboxConfig, MetadataConfig, GroupByDateMode }
@@ -114,9 +115,6 @@ export function Gallery (props: GalleryProps) {
         )}
 {/* Container is intentionally empty - web.js's virtualisation manager
             populates it with only the tiles within the viewport buffer. */}
-        {props.uploadPath && (
-          <div id="upload-status" role="status" aria-live="polite" hidden></div>
-        )}
         <div id="gallery"></div>
         {props.showDownloadZip && (
           <div id="select-toolbar" hidden>
@@ -143,6 +141,7 @@ export function Gallery (props: GalleryProps) {
           dangerouslySetInnerHTML={{ __html: initJson }}
         />
         <script type="module" src={`/share/static/${ASSET_VERSION}/js/client/init.js`}></script>
+        {props.uploadPath && <UploadPanel/>}
         <SourceFooter/>
       </body>
     </html>

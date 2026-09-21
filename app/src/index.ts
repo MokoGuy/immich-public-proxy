@@ -327,6 +327,14 @@ app.post('/:shareType(share|s)/:key/upload', decodeCookie, asyncHandler(async (r
     res.status(503).set('Retry-After', '5').json({ reason: 'busy' })
     return
   }
+  /*
+   * Reserve the slot HERE, with no await between the check and the increment.
+   * The loop is single-threaded, so those two statements together are atomic;
+   * anything asynchronous in between is not. Reserving later - after share
+   * resolution, say - lets every concurrent caller read the same zero, pass
+   * the check together and then all increment, which is no cap at all.
+   */
+  uploadsInFlight++
 
   // Register disconnect handling BEFORE the first await: the visitor can go
   // away during share resolution too. `res` close (rather than the request's
@@ -340,6 +348,7 @@ app.post('/:shareType(share|s)/:key/upload', decodeCookie, asyncHandler(async (r
   try {
     await handleUpload(req, res, keyType, abort)
   } finally {
+    uploadsInFlight--
     res.off('close', onClose)
   }
 }))
@@ -381,23 +390,17 @@ async function handleUpload (req: Request, res: Response, keyType: KeyType, abor
     return
   }
 
-  uploadsInFlight++
-  let outcome
-  try {
-    outcome = await uploadAsset({
-      key: req.params.key,
-      keyType,
-      password: req.password,
-      filename: toString(req.headers['x-ipp-filename']) || 'upload',
-      contentType,
-      createdAt,
-      body: req,
-      maxBytes,
-      signal: abort.signal
-    })
-  } finally {
-    uploadsInFlight--
-  }
+  const outcome = await uploadAsset({
+    key: req.params.key,
+    keyType,
+    password: req.password,
+    filename: toString(req.headers['x-ipp-filename']) || 'upload',
+    contentType,
+    createdAt,
+    body: req,
+    maxBytes,
+    signal: abort.signal
+  })
 
   if (!outcome.ok) {
     if (outcome.reason === 'aborted') {

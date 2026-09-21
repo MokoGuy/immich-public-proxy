@@ -107,6 +107,12 @@ visitor's own multipart body would hand an anonymous uploader control over all
 of them. Constructing multipart is trivial; parsing it would need a real
 dependency, and this design avoids it entirely.
 
+To be precise about what a visitor *does* control: the file bytes, the
+filename (sanitised, and given an extension if it lacks one) and the capture
+date (`X-IPP-Created-At`, validated and refused if it is more than a day in
+the future). Everything else — `deviceAssetId`, `deviceId`, and the absence
+of every other DTO field — is generated here.
+
 Bytes are never staged in memory or on disk — the request streams straight
 through to Immich, mirroring how `stream/asset.ts` streams downloads out.
 
@@ -116,6 +122,10 @@ An upload-enabled gallery is served `Cache-Control: no-store`, and a
 successful upload drops IPP's memoised share (120 s TTL). Without both, a
 visitor would reload into a stale page that does not contain the photo they
 just added.
+
+Read-only galleries keep the configured `ipp.gallery.cacheTime` — **unless
+they are password-protected**, which upstream already serves `no-store`, and
+which this must never downgrade.
 
 ## Testing against a real Immich
 
@@ -254,7 +264,72 @@ to break on an Immich upgrade:
 Running an ephemeral Immich pinned to one version would make these break
 loudly and on purpose rather than silently in production — see below.
 
-## What a visitor is told when an upload fails
+## What a visitor sees
+
+The upload experience follows Immich's own upload panel
+(`web/src/routes/UploadPanel.svelte`): a card floating above the page, one row
+per file carrying a state icon and a progress bar, and a minimised badge with
+the count. Someone who uses Immich should not have to learn a second idiom for
+a link Immich gave them.
+
+Two deliberate departures. Immich pins a ~324 px card bottom-right, which is
+cramped on a 412 px phone — here it is a full-width sheet at the bottom below
+600 px, where a thumb already is, and the floating card above that. And Immich
+exposes an upload-concurrency control, which is an operator setting, not
+something to put in front of an anonymous visitor.
+
+Being `position: fixed` is load-bearing beyond looks: the panel never changes
+the gallery's layout, so the virtualiser — which only recomputes on a width
+change — has nothing to reconcile.
+
+### Progress
+
+Transfer progress comes from `XMLHttpRequest`, because `fetch()` reports
+nothing about how much of a request body has gone out. A `ReadableStream`
+request body does not solve it either: it counts bytes consumed into the
+browser's buffers rather than bytes on the wire, and stable iOS Safari does
+not support it at all.
+
+Each row shows `22% of 150 MB · 119 KB/s · 9s left`. The rate is a rolling
+five-second estimate, so it tracks reality instead of averaging away a stalled
+connection. On a phone sending a large video, a file counter alone cannot say
+whether anything is moving.
+
+The figures sit above the bar rather than inside it, as Immich writes them:
+Immich's fill is a light accent on a dark track, so no single text colour
+reads on both halves.
+
+A **screen wake lock is requested** while uploads are in flight — the same
+thing Immich's panel does — because both mobile platforms suspend a
+backgrounded page and kill the upload.
+
+This is a request, not a guarantee: the API is missing on some browsers, the
+user agent may deny it, and the system releases the lock when the tab is
+hidden without it being reacquired. That is why the panel also says to keep
+the page open, and why nothing here promises an upload survives being
+backgrounded.
+
+### States
+
+| State | Shown as |
+|---|---|
+| Waiting | Outline circle, "Waiting" |
+| Sending | Spinner, bar, percentage / size / rate / ETA |
+| Sent, not confirmed | Pulsing full bar, "Sent — waiting for the photo server…" |
+| Added | Blue check |
+| Already uploaded | Amber alert, "Already uploaded — skipped" |
+| Failed | Red alert, the reason, and a retry button |
+| Not attempted | Outline circle, "Not attempted" |
+
+The bar never sits at a solid 100 %: between the last byte leaving the browser
+and Immich accepting the asset there is a real wait, and calling that "added"
+is a claim that gets found out on the next page load.
+
+**Duplicates are not failures.** Immich deduplicates by checksum across the
+owner's whole library — not per album — and does not file a duplicate into the
+album, so the wording is "already uploaded", not "already in this album".
+
+### When an upload fails
 
 "Upload failed" is useless: retrying, picking a smaller file and asking the
 album owner are three different next steps. So failures name the file and the
@@ -266,25 +341,39 @@ so probing for valid links learns nothing. Once a share *has* resolved, the
 visitor demonstrably holds a working link and can already see the gallery;
 telling them why the upload was refused leaks nothing new.
 
-| Situation | Status | What the visitor reads |
+| Situation | Status | Row reads |
 |---|---|---|
 | Unknown key | `404`, empty | (the gallery never loaded) |
-| Uploads not enabled on the link | `403 not-allowed` | This link no longer accepts uploads |
+| Uploads not enabled | `403 not-allowed` | This link no longer accepts uploads |
 | Link expired | `403 expired` | This link has expired |
-| Album at its ceiling | `403 album-full` | The album is full — ask whoever shared it to make room |
-| File over the size cap | `413 too-large` | `beach.mp4` is larger than 200 MB |
-| Not actually a photo/video | `400 not-media` | `notes.png` is not a photo or video |
-| Empty file | `400 empty` | `x.jpg` is empty |
-| Too many at once | `503 busy` | Too many uploads at once — try again in a few seconds |
-| Immich refused it | `502 upstream` | The photo server would not accept `x.jpg` |
+| Album at its ceiling | `403 album-full` | The album is full |
+| Over the size cap | `413 too-large` | Larger than 200 MB |
+| Not a photo or video | `400 not-media` | Not a photo or video |
+| Empty file | `400 empty` | File is empty |
+| Too many at once | `503 busy` | (held and retried after `Retry-After`) |
+| Immich refused it | `502 upstream` | The photo server refused it |
+| Stopped mid-transfer | — | Stopped — may have been added |
 
 Size and emptiness are caught **in the browser, before a byte is sent**.
 Uploading 300 MB over a phone connection and only then being told it was too
 big is the kind of thing that makes people give up.
 
-Multi-file selections report per file — `Added 3. Not added: beach.mp4 is
-larger than 200 MB` — rather than a bare count, capped at three reasons before
-it falls back to "and N more".
+A refusal about the **link** rather than the file — expired, album full,
+uploads disabled — marks the rest of the queue "not attempted" instead of
+marching through it collecting the same refusal.
+
+**Stopping is not rolling back.** An aborted upload may already have reached
+Immich with only the response lost, so the row says "may have been added"
+rather than guessing. Retrying is safe regardless: Immich deduplicates by
+content.
+
+### Accessibility
+
+The bar updates many times a second; a live region echoing it would be
+unusable. A separate visually-hidden `role="status"` node announces milestones
+only — the file starting, roughly every 15 seconds during a long transfer, the
+wait for confirmation, and the final summary.
+
 
 ## Licence obligation (AGPL-3.0 section 13)
 
@@ -336,10 +425,11 @@ Consequences for you:
 - **No per-format validation beyond the signature check.** The bytes are
   confirmed to match the declared type (see below), but a genuine image is
   still a genuine image from a stranger.
-- **The share key is the credential.** For a password-protected link the
-  visitor additionally needs the password, which IPP exchanges for an Immich
-  `immich_shared_link_token` cookie via `authHeaders()`. For an unprotected
-  link the key alone is enough, and it travels in URLs, browser history and
-  messages — treat it as a capability you hand out, not an identity.
+- **No API key is involved in an upload.** The credential is the share key;
+  a password-protected link additionally requires the password, which IPP
+  exchanges for an Immich `immich_shared_link_token` cookie. For an
+  unprotected link the key alone is enough, and it travels in URLs, browser
+  history and messages — treat it as a capability you hand out, not an
+  identity.
 - **No per-visitor identity or attribution.** Every upload arrives as the
   share owner; you cannot tell which friend sent what.

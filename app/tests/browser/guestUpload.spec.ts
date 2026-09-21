@@ -76,7 +76,10 @@ test.describe('guest upload in the browser', () => {
     expect(names).toContain('browser-b.png')
   })
 
-  test('reports progress and then shows the new photo', async ({ page }) => {
+  test('shows the new photo once the visitor refreshes', async ({ page }) => {
+    // The panel no longer reloads the page on a timer: a summary that
+    // vanishes before it can be read is worse than none. The visitor decides
+    // when to refresh, so the test has to press the button too.
     await page.goto(`${cfg!.ippUrl}/share/${uploadKey}`)
     const before = (await fx.albumAssetIds(albumId)).length
 
@@ -86,26 +89,29 @@ test.describe('guest upload in the browser', () => {
       { name: 'browser-status.png', mimeType: 'image/png', buffer: makePng(140, 100, false, 61) }
     ])
 
-    // The status region is aria-live, so it must carry real text for a screen
-    // reader rather than only changing colour.
-    await expect(page.locator('#upload-status')).toContainText(/Uploading|Added/, { timeout: 30000 })
+    await expect(page.locator('#upload-panel')).toBeVisible({ timeout: 30000 })
+    const row = page.locator('#upload-files li', { hasText: 'browser-status.png' })
+    await expect(row).toContainText('Added', { timeout: 60000 })
 
     await expect.poll(async () => (await fx.albumAssetIds(albumId)).length, {
-      timeout: 60000,
-      intervals: [1000]
+      timeout: 60000, intervals: [1000]
     }).toBe(before + 1)
 
-    // The client reloads itself; the new asset must be on the page that comes
-    // back. Counting DOM tiles would be wrong - the gallery is virtualised and
-    // only renders what is near the viewport, so assert on the id instead.
+    // Refresh is offered only once there is something to see.
+    const refresh = page.getByRole('button', { name: 'Refresh gallery' })
+    await expect(refresh).toBeVisible()
+    await refresh.click()
+    await page.waitForLoadState('load')
+
     const ids = await fx.albumAssetIds(albumId)
     const details = await Promise.all(ids.map(async id => ({ id, ...(await fx.assetDetail(id)) })))
     const uploaded = details.find(d => d.originalFileName === 'browser-status.png')
     expect(uploaded, 'the uploaded asset should be in the album').toBeTruthy()
 
+    // Counting DOM tiles would be wrong - the gallery is virtualised and only
+    // renders what is near the viewport - so assert on the id in the page.
     await expect.poll(async () => (await page.content()).includes(uploaded!.id), {
-      timeout: 60000,
-      intervals: [1000]
+      timeout: 60000, intervals: [1000]
     }).toBe(true)
   })
 
@@ -120,10 +126,13 @@ test.describe('guest upload in the browser', () => {
       { name: 'not-really.png', mimeType: 'image/png', buffer: Buffer.from('PK' + 'A'.repeat(64), 'latin1') }
     ])
 
-    // The message must name the file and the reason, not just say "failed":
-    // those are different next steps for the visitor.
-    await expect(page.locator('#upload-status'))
-      .toContainText(/not-really\.png is not a photo or video/i, { timeout: 30000 })
+    // The row must name the file AND the reason: retrying, picking another
+    // file and asking the owner are different next steps.
+    const row = page.locator('#upload-files li', { hasText: 'not-really.png' })
+    await expect(row).toContainText(/not a photo or video/i, { timeout: 30000 })
+    await expect(row).toHaveClass(/upload-item-failed/)
+    // A failed row offers a retry rather than making them start over.
+    await expect(row.getByRole('button', { name: /retry/i })).toBeVisible()
     expect((await fx.albumAssetIds(albumId)).length).toBe(before)
   })
 
@@ -143,10 +152,68 @@ test.describe('guest upload in the browser', () => {
       { name: 'huge.png', mimeType: 'image/png', buffer: Buffer.alloc(3 * 1024 * 1024, 7) }
     ])
 
-    await expect(page.locator('#upload-status'))
-      .toContainText(/huge\.png is larger than/i, { timeout: 30000 })
+    await expect(page.locator('#upload-files li', { hasText: 'huge.png' }))
+      .toContainText(/larger than/i, { timeout: 30000 })
     expect(requests).toHaveLength(0)
     expect((await fx.albumAssetIds(albumId)).length).toBe(before)
+  })
+
+  test('reports real transfer progress, not just a file count', async ({ page }) => {
+    // The whole reason for XHR over fetch: on a slow link one large file
+    // dominates a run, and "1 of 2" cannot say whether it is moving.
+    //
+    // Asserting that SOME percentage appears would pass on an upload that had
+    // already finished - "100% of 1 MB" matches too. So this samples the row
+    // while the transfer runs and requires a reading strictly between 0 and
+    // 100, which only exists if progress events are actually arriving.
+    await page.goto(`${cfg!.ippUrl}/share/${uploadKey}`)
+    const client = await page.context().newCDPSession(page)
+    await client.send('Network.emulateNetworkConditions', {
+      offline: false, latency: 100, downloadThroughput: 4_000_000, uploadThroughput: 100_000
+    })
+
+    const seen: string[] = []
+    const sampler = setInterval(() => {
+      page.locator('#upload-files li').first().innerText()
+        .then(t => seen.push(t))
+        .catch(() => undefined)
+    }, 200)
+
+    const chooser = page.waitForEvent('filechooser')
+    await page.getByRole('button', { name: 'Add photos' }).click()
+    // Incompressible, so the throttle actually bites: ~1.1 MB at 100 kB/s.
+    await (await chooser).setFiles([
+      { name: `slow-${Date.now()}.png`, mimeType: 'image/png', buffer: makePng(700, 560, true, 91) }
+    ])
+
+    const row = page.locator('#upload-files li').first()
+    await expect(row).toContainText(/Added|Already uploaded/, { timeout: 120000 })
+    clearInterval(sampler)
+
+    const percentages = [...seen.join('\n').matchAll(/(\d+)% of/g)].map(m => Number(m[1]))
+    expect(percentages.length, 'no progress reading was ever rendered').toBeGreaterThan(0)
+    expect(
+      percentages.some(p => p > 0 && p < 100),
+      `only saw ${percentages.join(',')} - no mid-transfer reading, so progress may be faked`
+    ).toBe(true)
+    // The rate is what answers "will this finish?"; it only appears once the
+    // rolling estimate has two samples, i.e. once bytes are genuinely moving.
+    expect(seen.join('\n')).toMatch(/\d+\s*(KB|MB)\/s/)
+  })
+
+  test('minimises to a badge and comes back', async ({ page }) => {
+    await page.goto(`${cfg!.ippUrl}/share/${uploadKey}`)
+    const chooser = page.waitForEvent('filechooser')
+    await page.getByRole('button', { name: 'Add photos' }).click()
+    await (await chooser).setFiles([
+      { name: 'badge.png', mimeType: 'image/png', buffer: makePng(90, 70, false, 55) }
+    ])
+    await expect(page.locator('#upload-panel')).toBeVisible({ timeout: 30000 })
+    await page.locator('#upload-minimise').click()
+    await expect(page.locator('#upload-panel')).toBeHidden()
+    await expect(page.locator('#upload-badge')).toBeVisible()
+    await page.locator('#upload-badge').click()
+    await expect(page.locator('#upload-panel')).toBeVisible()
   })
 
   test('does not leave the visitor on a cached page after uploading', async ({ page }) => {
