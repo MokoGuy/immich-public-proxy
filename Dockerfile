@@ -19,7 +19,9 @@ COPY --from=builder --chown=node:node app/ ./
 RUN npm ci --omit=dev
 
 ARG PACKAGE_VERSION
+ARG BUILD_DATE
 ENV APP_VERSION=${PACKAGE_VERSION}
+ENV APP_BUILD_DATE=${BUILD_DATE}
 ENV NODE_ENV=production
 
 CMD ["node", "dist/index.js" ]

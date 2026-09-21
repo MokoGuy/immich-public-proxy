@@ -210,8 +210,9 @@ describe('AGPL section 13 source offer', () => {
     expect(sourceUrl()).toContain('/tree/')
   })
 
-  it('abbreviates a commit SHA in the label but keeps it in the href', () => {
-    expect(sourceLabel()).toMatch(/^Source( \(|$)/)
+  it('names the product so the offer is recognisable', () => {
+    // Shape only - tests/sourceLabel.test.ts covers version and build date.
+    expect(sourceLabel()).toMatch(/^IPP\b/)
   })
 
   it('can be repointed so a fork of this fork offers its own source', () => {

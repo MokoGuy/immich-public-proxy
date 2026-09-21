@@ -127,6 +127,9 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
-            PACKAGE_VERSION=${{ github.sha }}
+            # A tag is an exact, stable ref; a branch name is not, and AGPL
+            # section 13 asks for the source of the version actually running.
+            PACKAGE_VERSION=${{ github.ref_type == 'tag' && github.ref_name || github.sha }}
+            BUILD_DATE=${{ fromJSON(steps.meta.outputs.json).labels['org.opencontainers.image.created'] }}
           cache-from: type=gha
           cache-to: type=gha,mode=max

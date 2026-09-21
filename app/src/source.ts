@@ -1,5 +1,5 @@
 import { getConfigOption } from './config/access'
-import { APP_VERSION } from './version'
+import { APP_BUILD_DATE, APP_VERSION } from './version'
 
 /*
  * AGPL-3.0 section 13.
@@ -43,12 +43,15 @@ export function sourceUrl (): string {
 }
 
 /**
- * Short, honest label. A 40-character SHA is unreadable in a footer, so it is
- * abbreviated - the href still carries the full ref.
+ * What the footer reads: `IPP 3.3.1-upload.2 (2026-09-21)`.
+ *
+ * The version alone does not say whether what is running is a week or a year
+ * old, and a bare 40-character SHA says nothing at all to a human - so a
+ * commit build is abbreviated and the build date carries the rest.
  */
 export function sourceLabel (): string {
   const ref = APP_VERSION
-  if (!ref || ref === 'dev') return 'Source'
+  if (!ref || ref === 'dev') return APP_BUILD_DATE ? `IPP (${APP_BUILD_DATE})` : 'IPP'
   const short = /^[0-9a-f]{40}$/i.test(ref) ? ref.slice(0, 7) : ref
-  return `Source (${short})`
+  return APP_BUILD_DATE ? `IPP ${short} (${APP_BUILD_DATE})` : `IPP ${short}`
 }
