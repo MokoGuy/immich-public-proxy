@@ -19,6 +19,7 @@ Same environment contract as the e2e suite, plus Playwright:
 
 import { test, expect } from '@playwright/test'
 import { ImmichFixtures, makePng, readConfig } from '../e2e/helpers'
+import { jpegWithExif, jpegWithoutExif, TAG } from '../fixtures/exifJpeg'
 
 const cfg = readConfig()
 
@@ -450,5 +451,29 @@ test.describe('guest upload in the browser', () => {
   test('does not leave the visitor on a cached page after uploading', async ({ page }) => {
     const res = await page.goto(`${cfg!.ippUrl}/share/${uploadKey}`)
     expect(res?.headers()['cache-control']).toBe('no-store')
+  })
+
+  test('warns the visitor when the file carries no capture date', async ({ page }) => {
+    /*
+     * The date is wrong at exactly the moment nobody is looking: the album
+     * shows the photo as taken today, the owner has no way to know better,
+     * and the visitor who does know has already closed the page. Saying it
+     * while they are still here is the only chance to catch it.
+     */
+    await page.goto(`${cfg!.ippUrl}/share/${uploadKey}`)
+    const chooser = page.waitForEvent('filechooser')
+    await page.getByRole('button', { name: 'Add photos' }).click()
+    await (await chooser).setFiles([
+      { name: 'dateless.jpg', mimeType: 'image/jpeg', buffer: jpegWithoutExif() },
+      { name: 'dated.jpg', mimeType: 'image/jpeg', buffer: jpegWithExif([[TAG.make, 'Google']], [[TAG.dateTimeOriginal, '2026:04:05 08:30:00']]) }
+    ])
+
+    const dateless = page.locator('#upload-files li', { hasText: 'dateless.jpg' })
+    await expect(dateless).toContainText('no date in the file', { timeout: 60000 })
+
+    // And it must not cry wolf on a file that does carry one.
+    const dated = page.locator('#upload-files li', { hasText: 'dated.jpg' })
+    await expect(dated).toContainText('Added', { timeout: 60000 })
+    await expect(dated).not.toContainText('no date in the file')
   })
 })

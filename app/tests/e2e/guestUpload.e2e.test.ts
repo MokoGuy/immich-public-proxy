@@ -27,6 +27,7 @@ import {
   uploadSlowToIpp,
   uploadToIpp
 } from './helpers'
+import { jpegWithExif, jpegWithoutExif, TAG } from '../fixtures/exifJpeg'
 
 const cfg = readConfig()
 const run = describe.skipIf(!cfg)
@@ -757,5 +758,52 @@ run('guest upload against a live Immich', () => {
       expect(line).not.toContain('reported.png')
       expect(line).not.toContain(uploadKey)
     }, 120000)
+  })
+
+  describe('capture date', () => {
+    /*
+     * The browser has nothing better than File.lastModified for fileCreatedAt,
+     * and for a copy exported by the Android photo picker that is the moment
+     * of the export. Immich only consults the capture tags, so a file that
+     * lost them gets dated on upload day. Measured in production: 4 of 30
+     * guest uploads, three of which still carried DateTime pointing three days
+     * earlier.
+     */
+    const CAMERA: Array<[number, string]> = [[TAG.make, 'Google'], [TAG.model, 'Pixel 8a']]
+
+    const uploadAndRead = async (body: Buffer, filename: string) => {
+      const res = await uploadToIpp(c, `/share/${uploadKey}`, body, {
+        filename, createdAt: CREATED_AT, contentType: 'image/jpeg'
+      })
+      expect(res.status).toBe(200)
+      const out = await res.json() as { id: string, dateSource?: string }
+      fx.track(out.id)
+      return { ...out, detail: await fx.assetDetail(out.id) }
+    }
+
+    it('dates the asset from the file, not from when it was uploaded', async () => {
+      const out = await uploadAndRead(
+        jpegWithExif(CAMERA, [[TAG.dateTimeOriginal, '2026:03:04 09:15:00']]),
+        'has-capture-date.jpg')
+      expect(out.dateSource).toBe('exif-original')
+      expect(out.detail.fileCreatedAt.slice(0, 10)).toBe('2026-03-04')
+    })
+
+    it('salvages DateTime, which Immich alone would have ignored', async () => {
+      // The whole point: Immich never looks at this tag, so if IPP does not
+      // send it the asset lands on today's date.
+      const out = await uploadAndRead(
+        jpegWithExif([...CAMERA, [TAG.modifyDate, '2026:02:01 21:13:07']]),
+        'only-modify-date.jpg')
+      expect(out.dateSource).toBe('exif-modify')
+      expect(out.detail.fileCreatedAt.slice(0, 10)).toBe('2026-02-01')
+      expect(out.detail.fileCreatedAt.slice(0, 10)).not.toBe(new Date().toISOString().slice(0, 10))
+    })
+
+    it('tells the visitor when the file carried no date at all', async () => {
+      const out = await uploadAndRead(jpegWithoutExif(), 'no-exif.jpg')
+      expect(out.dateSource, 'the visitor must be told the date is a guess').toBe('client')
+      expect(out.detail.fileCreatedAt.slice(0, 10)).toBe(CREATED_AT.slice(0, 10))
+    })
   })
 })

@@ -380,7 +380,7 @@ describe('hostile input', () => {
     const outcome = await uploadAsset(request({
       contentType: 'image/gif', filename: 'tiny.gif', body: Readable.from([gif])
     }))
-    expect(outcome).toEqual({ ok: true, id: 'new-asset', status: 'created' })
+    expect(outcome).toEqual({ ok: true, id: 'new-asset', status: 'created', dateSource: 'client' })
     expect(calls[0].raw.includes(gif)).toBe(true)
   })
 
@@ -407,7 +407,7 @@ describe('uploadAsset wire format', () => {
     const calls = captureFetch()
     const outcome = await uploadAsset(request())
 
-    expect(outcome).toEqual({ ok: true, id: 'new-asset', status: 'created' })
+    expect(outcome).toEqual({ ok: true, id: 'new-asset', status: 'created', dateSource: 'client' })
     expect(calls).toHaveLength(1)
     const { body, url } = calls[0]
     // Immich's required fields, all generated server-side.

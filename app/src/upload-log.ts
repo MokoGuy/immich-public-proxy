@@ -39,6 +39,8 @@ export type UploadLabel =
   | 'no-expiry' | 'expired' | 'expiry-too-far' | 'album-full'
   // what the visitor sent
   | 'not-media' | 'bad-date' | 'too-large' | 'empty' | 'bad-checksum'
+  // accepted, but the file carried no capture date of its own
+  | 'no-capture-date'
   // the share did not resolve; 401 and 404 are collapsed on purpose, so the
   // log cannot be read as an oracle for which keys exist
   | 'unresolved-share'

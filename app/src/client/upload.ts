@@ -15,11 +15,16 @@ import {
 
 type ItemState = 'waiting' | 'checking' | 'sending' | 'confirming' | 'done' | 'duplicate' | 'failed' | 'skipped'
 
+/** Set when the accepted file carried no capture date of its own. */
+type DatelessFlag = boolean
+
 interface Item {
   file: File
   state: ItemState
   progress?: UploadProgress
   reason?: string
+  /** The accepted file carried no capture date, so Immich dated it today. */
+  dateless?: DatelessFlag
   el?: HTMLLIElement
   /** Last state the row's structure was built for; see renderItem. */
   builtFor?: ItemState
@@ -151,7 +156,7 @@ function detailFor (item: Item): string {
       return `${pct}% of ${humanBytes(p.total)}${rate}${eta ? ` · ${eta}` : ''}`
     }
     case 'confirming': return 'Sent — waiting for the photo server…'
-    case 'done': return 'Added'
+    case 'done': return item.dateless ? 'Added — no date in the file, so it will show as taken today' : 'Added'
     // Immich deduplicates by checksum across the owner's whole library, not
     // per album, and a duplicate is not filed into the album. Saying "already
     // in this album" would be wrong whenever the owner happens to have the
@@ -382,6 +387,10 @@ async function run (): Promise<void> {
     controller = null
 
     if (outcome.ok) {
+      // The file had no capture date, so the album will show it as taken
+      // today. Worth saying while the visitor is still here and can tell the
+      // owner - they cannot fix it afterwards, and nobody else will notice.
+      item.dateless = outcome.dateSource === 'client'
       item.state = outcome.status === 'duplicate' ? 'duplicate' : 'done'
       item.progress = undefined
     } else if (outcome.aborted) {

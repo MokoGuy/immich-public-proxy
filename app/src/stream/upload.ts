@@ -1,5 +1,6 @@
 import { Readable } from 'stream'
 import { randomUUID } from 'crypto'
+import { CaptureDate, captureDate, DateSource, noteParserFailure } from './capture-date'
 import { apiUrl, authHeaders, buildUrl } from '../immich'
 import { KeyType } from '../types'
 
@@ -61,7 +62,7 @@ export type CheckResult =
   | { available: false }
 
 export type UploadOutcome =
-  | { ok: true, id: string, status: string }
+  | { ok: true, id: string, status: string, dateSource: DateSource }
   | { ok: false, reason: 'too-large' | 'aborted' | 'rejected' | 'transport' | 'error' | 'empty' | 'not-media' }
 
 /**
@@ -72,6 +73,7 @@ export type UploadOutcome =
  * hung up" once the error has been through that machinery.
  */
 interface UploadState {
+  dateSource: DateSource
   overflowed: boolean
   empty: boolean
   notMedia: boolean
@@ -144,6 +146,14 @@ function truncatePreservingExtension (name: string, max: number): string {
  * this table has not heard of.
  */
 const SNIFF_BYTES = 16
+/*
+ * How much of the file to hold back before writing the multipart fields.
+ * `fileCreatedAt` has to go out BEFORE the bytes, so the capture date must be
+ * known by then - and it lives in the EXIF block near the start of the file.
+ * 128 KiB covers JPEG APP1 and the HEIC meta box comfortably; the cost is
+ * that much per upload in flight, bounded by `maxConcurrent`.
+ */
+const HEAD_BYTES = 128 * 1024
 
 function matchesDeclaredType (contentType: string, head: Buffer): boolean {
   const type = contentType.split(';')[0].trim().toLowerCase()
@@ -217,20 +227,16 @@ async function * multipartBody (req: UploadRequest, boundary: string, st: Upload
   const field = (name: string, value: string) =>
     Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="${name}"\r\n\r\n${value}\r\n`)
 
-  yield field('deviceAssetId', randomUUID())
-  yield field('deviceId', DEVICE_ID)
-  yield field('fileCreatedAt', req.createdAt)
-  yield field('fileModifiedAt', req.createdAt)
-  yield Buffer.from(
-    `--${boundary}\r\n` +
-    `Content-Disposition: form-data; name="assetData"; filename="${filename}"\r\n` +
-    `Content-Type: ${req.contentType}\r\n\r\n`
-  )
-
   let bytes = 0
-  // Hold back just enough of the leading bytes to identify the format. This
-  // is the only buffering in the path, and it is 16 bytes.
+  /*
+   * Hold back the leading bytes before writing anything. Two things need
+   * them, and both have to happen before the fields go out: the format check
+   * (16 bytes, run as soon as they arrive so a non-media upload dies early
+   * rather than after buffering 128 KiB), and the capture date, which has to
+   * be known before `fileCreatedAt` is written.
+   */
   let head: Buffer | null = Buffer.alloc(0)
+  let sniffed = false
 
   for await (const chunk of req.body) {
     bytes += chunk.length
@@ -244,11 +250,15 @@ async function * multipartBody (req: UploadRequest, boundary: string, st: Upload
     }
     if (head) {
       head = Buffer.concat([head, chunk])
-      if (head.length < SNIFF_BYTES) continue
-      if (!matchesDeclaredType(req.contentType, head)) {
-        st.notMedia = true
-        throw new UploadNotMedia()
+      if (!sniffed && head.length >= SNIFF_BYTES) {
+        if (!matchesDeclaredType(req.contentType, head)) {
+          st.notMedia = true
+          throw new UploadNotMedia()
+        }
+        sniffed = true
       }
+      if (head.length < HEAD_BYTES) continue
+      yield * preamble(req, boundary, filename, field, head, st)
       yield head
       head = null
       continue
@@ -256,20 +266,54 @@ async function * multipartBody (req: UploadRequest, boundary: string, st: Upload
     yield chunk
   }
 
-  // Short file: never reached the sniff threshold, so decide on what we have.
+  // The file ended inside the head, so decide on everything we have.
   if (head) {
     if (head.length === 0) {
       st.empty = true
       throw new UploadEmpty()
     }
-    if (!matchesDeclaredType(req.contentType, head)) {
+    if (!sniffed && !matchesDeclaredType(req.contentType, head)) {
       st.notMedia = true
       throw new UploadNotMedia()
     }
+    yield * preamble(req, boundary, filename, field, head, st)
     yield head
   }
 
   yield Buffer.from(`\r\n--${boundary}--\r\n`)
+}
+
+/**
+ * The generated fields plus the file part header. Emitted once the head is in
+ * hand, because `fileCreatedAt` depends on what the head says.
+ */
+function * preamble (
+  req: UploadRequest,
+  boundary: string,
+  filename: string,
+  field: (name: string, value: string) => Buffer,
+  head: Buffer,
+  st: UploadState
+): Generator<Buffer> {
+  let when: CaptureDate
+  try {
+    when = captureDate(head, req.contentType, req.createdAt)
+  } catch (e) {
+    // The parser must never be able to fail an upload.
+    noteParserFailure()
+    when = { iso: req.createdAt, source: 'client' }
+  }
+  st.dateSource = when.source
+
+  yield field('deviceAssetId', randomUUID())
+  yield field('deviceId', DEVICE_ID)
+  yield field('fileCreatedAt', when.iso)
+  yield field('fileModifiedAt', when.iso)
+  yield Buffer.from(
+    `--${boundary}\r\n` +
+    `Content-Disposition: form-data; name="assetData"; filename="${filename}"\r\n` +
+    `Content-Type: ${req.contentType}\r\n\r\n`
+  )
 }
 
 class UploadTooLarge extends Error {
@@ -306,7 +350,7 @@ export async function uploadAsset (req: UploadRequest): Promise<UploadOutcome> {
     'Content-Type': `multipart/form-data; boundary=${boundary}`
   }
 
-  const st: UploadState = { overflowed: false, empty: false, notMedia: false }
+  const st: UploadState = { overflowed: false, empty: false, notMedia: false, dateSource: 'client' }
   const stream = Readable.from(multipartBody(req, boundary, st))
   try {
     const res = await fetch(url, {
@@ -336,7 +380,7 @@ export async function uploadAsset (req: UploadRequest): Promise<UploadOutcome> {
     }
     const body = await res.json() as { id?: string, status?: string }
     if (!body?.id) return { ok: false, reason: 'error' }
-    return { ok: true, id: body.id, status: body.status || 'created' }
+    return { ok: true, id: body.id, status: body.status || 'created', dateSource: st.dateSource }
   } catch (e) {
     // Classified at the source, because fetch wraps body errors in an opaque
     // TypeError - `instanceof UploadTooLarge` would not survive the trip.

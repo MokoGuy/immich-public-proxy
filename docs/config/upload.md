@@ -89,6 +89,9 @@ when there is something to say:
 Guest upload | upload: created=3 duplicate=1 too-large=1 | check: answered=4 | slots 1/2 oldest <1m
 ```
 
+`no-capture-date` counts uploads Immich accepted whose file carried no capture
+date at all — see below. It is not a failure, so it does not raise the level.
+
 It is a `WARN` rather than an informational line when the summary contains a
 degraded outcome — `busy`, `upstream-rejected`, `invalid-response`,
 `transport`, `idle-timeout`, `deadline` or `unavailable`. A visitor sending the
@@ -118,6 +121,48 @@ Two limits worth knowing. Counters count *requests*, not guests or photos: a
 retry counts twice, and a pre-check followed by an upload is two operations.
 And `created` means Immich accepted and stored the asset — not that its
 thumbnail is ready, nor that the visitor received the response.
+
+### Where an uploaded photo's date comes from
+
+Immich derives an asset's date from EXIF when it can, and otherwise keeps the
+`fileCreatedAt` the uploader sent. A browser has nothing better to offer for
+that field than `File.lastModified` — and for a file handed over by the
+Android photo picker, that is the moment the picker exported a copy. A photo
+taken last week then arrives dated today.
+
+Immich only consults the capture tags, `DateTimeOriginal` and `CreateDate`. It
+deliberately ignores `DateTime` (exiftool calls it `ModifyDate`) because in
+general that is an edit timestamp. But the Android picker produces exactly the
+file where the capture tags are gone and `DateTime` survives — and there, an
+edit timestamp from days before the upload still beats the upload clock.
+
+So IPP reads the first 128 KiB of an image before writing the multipart fields
+and picks, in order:
+
+| Source | Meaning |
+|---|---|
+| `exif-original` | `DateTimeOriginal`, with `OffsetTimeOriginal` when present |
+| `exif-create` | `CreateDate` / `DateTimeDigitized` |
+| `exif-modify` | `DateTime`, salvaged when the capture tags are gone |
+| `client` | nothing in the file; the browser's `lastModified` stands |
+| `not-inspected` | a video — see below |
+
+The chosen source is returned to the client, which tells the visitor when it
+is `client`: the album will show that photo as taken today, and the visitor is
+the only person who knows better. It is also counted as `no-capture-date` in
+the periodic summary, so the owner can see it happening.
+
+Videos are not inspected. Their capture time lives in container atoms this
+does not read, and Immich does read them — reporting "no date" for a video
+would be the proxy failing to look, not the file failing to say.
+
+When a date carries no UTC offset, the wall clock is preserved as-is rather
+than being interpreted in the proxy's timezone, which would move the photo by
+however far the server happens to be from the visitor.
+
+Parsing uses [exifreader](https://github.com/mattiasw/ExifReader) (MPL-2.0),
+on a bounded buffer, and can never fail an upload: a file it cannot read is a
+file IPP has no opinion about.
 
 ### Why the slot bounds exist
 

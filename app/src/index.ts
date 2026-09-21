@@ -575,7 +575,15 @@ async function handleUpload (req: Request, res: Response, keyType: KeyType, abor
   // "created" means Immich accepted and stored it. It does not promise the
   // thumbnail is ready or that the visitor received this response.
   recordUpload(outcome.status === 'duplicate' ? 'duplicate' : 'created')
-  res.json({ id: outcome.id, status: outcome.status })
+  /*
+   * A photo whose file carries no capture date at all gets dated by whatever
+   * the browser reported, which for a copy exported by a mobile picker is the
+   * moment of the export - so the album shows it as taken today. Counted so
+   * the owner can see it happening, and returned so the visitor is told
+   * rather than left to discover it later.
+   */
+  if (outcome.dateSource === 'client') recordUpload('no-capture-date')
+  res.json({ id: outcome.id, status: outcome.status, dateSource: outcome.dateSource })
 }
 
 /*

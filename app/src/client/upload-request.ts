@@ -23,7 +23,7 @@ export interface UploadProgress {
 }
 
 export type UploadOutcome =
-  | { ok: true, id: string, status: 'created' | 'duplicate' }
+  | { ok: true, id: string, status: 'created' | 'duplicate', dateSource?: string }
   | { ok: false, reason?: string, httpStatus?: number, retryAfterMs?: number, aborted?: boolean }
 
 export interface UploadRequestOptions {
@@ -82,10 +82,15 @@ export function uploadFile (opts: UploadRequestOptions): Promise<UploadOutcome> 
 
     xhr.addEventListener('load', () => {
       if (xhr.status >= 200 && xhr.status < 300) {
-        let body: { id?: string, status?: string } = {}
+        let body: { id?: string, status?: string, dateSource?: string } = {}
         try { body = JSON.parse(xhr.responseText) } catch (e) { /* treated as failure below */ }
         if (body.id) {
-          finish({ ok: true, id: body.id, status: body.status === 'duplicate' ? 'duplicate' : 'created' })
+          finish({
+            ok: true,
+            id: body.id,
+            status: body.status === 'duplicate' ? 'duplicate' : 'created',
+            dateSource: typeof body.dateSource === 'string' ? body.dateSource : undefined
+          })
           return
         }
         finish({ ok: false, httpStatus: xhr.status })
