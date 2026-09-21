@@ -22,6 +22,7 @@ import { checkDuplicate, uploadAsset } from './stream/upload'
 import dayjs from 'dayjs'
 import { NextFunction, Request, Response } from 'express-serve-static-core'
 import { Asset, AssetType, ImageSize, KeyType, SharedLink } from './types'
+import { boundSlot } from './upload-slot'
 import { getConfigOption, getNumericConfigOption } from './config/access'
 import { loadConfig } from './config/loader'
 import { addResponseHeaders, asyncHandler, errorHandler } from './http'
@@ -330,6 +331,7 @@ app.post('/:shareType(share|s)/:key/check', decodeCookie, asyncHandler(async (re
   const abort = new AbortController()
   const onClose = () => { if (!res.writableEnded) abort.abort() }
   res.on('close', onClose)
+  const unbind = boundSlot(req.socket, abort, CHECK_IDLE_MS, CHECK_TOTAL_MS)
 
   try {
     const result = await checkDuplicate({
@@ -366,6 +368,7 @@ app.post('/:shareType(share|s)/:key/check', decodeCookie, asyncHandler(async (re
     res.json({ duplicate: inThisShare, checked: true })
   } finally {
     uploadsInFlight--
+    unbind()
     res.off('close', onClose)
   }
 }))
@@ -401,6 +404,18 @@ const UPLOAD_MAX_CONCURRENT = Math.max(1, getNumericConfigOption('ipp.upload.max
  */
 let uploadsInFlight = 0
 
+/*
+ * Idle bound: silence longer than this means the visitor is gone, or Immich
+ * has stopped answering for a single asset - both abnormal. A slow upload
+ * keeps delivering bytes and never reaches it. Total bound: the backstop that
+ * makes "a slot always comes back" unconditional.
+ */
+const UPLOAD_IDLE_MS = Math.max(10, getNumericConfigOption('ipp.upload.idleTimeoutSeconds', 120)) * 1000
+const UPLOAD_TOTAL_MS = Math.max(60, getNumericConfigOption('ipp.upload.maxDurationSeconds', 1800)) * 1000
+// The probe sends no bytes, so it has no reason to be slow.
+const CHECK_IDLE_MS = 30_000
+const CHECK_TOTAL_MS = 60_000
+
 app.post('/:shareType(share|s)/:key/upload', decodeCookie, asyncHandler(async (req, res) => {
   const keyType = getKeyTypeFromShare(req.params.shareType)
 
@@ -433,11 +448,13 @@ app.post('/:shareType(share|s)/:key/upload', decodeCookie, asyncHandler(async (r
   const onClose = () => { if (!res.writableEnded) abort.abort() }
   res.on('close', onClose)
   if (res.destroyed) abort.abort()
+  const unbind = boundSlot(req.socket, abort, UPLOAD_IDLE_MS, UPLOAD_TOTAL_MS)
 
   try {
     await handleUpload(req, res, keyType, abort)
   } finally {
     uploadsInFlight--
+    unbind()
     res.off('close', onClose)
   }
 }))

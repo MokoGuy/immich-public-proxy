@@ -24,6 +24,8 @@ export interface E2EConfig {
   maxConcurrent: number
   /** A second proxy that permits writes through a slug link, if available. */
   ippSlugUrl?: string
+  /** A third proxy with aggressively short slot bounds, if available. */
+  ippReapUrl?: string
 }
 
 export const E2E_PREFIX = 'zz-ipp-e2e'
@@ -46,7 +48,8 @@ export function readConfig (): E2EConfig | null {
     // megabytes, and nobody wants a 200 MB buffer in a test run.
     maxFileMb: Number.isFinite(rawMax) && rawMax > 0 && rawMax <= 8 ? rawMax : undefined,
     maxConcurrent: Math.max(1, Number(process.env.E2E_UPLOAD_MAX_CONCURRENT) || 2),
-    ippSlugUrl: process.env.E2E_IPP_SLUG_URL?.replace(/\/+$/, '')
+    ippSlugUrl: process.env.E2E_IPP_SLUG_URL?.replace(/\/+$/, ''),
+    ippReapUrl: process.env.E2E_IPP_REAP_URL?.replace(/\/+$/, '')
   }
 }
 

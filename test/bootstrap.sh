@@ -25,6 +25,7 @@ IMMICH_URL="${IMMICH_URL:-http://127.0.0.1:2283}"
 IPP_URL="${IPP_URL:-http://127.0.0.1:3000}"
 # Second proxy, slug writes allowed - see test/immich-stack.yml.
 IPP_SLUG_URL="${IPP_SLUG_URL:-http://127.0.0.1:3001}"
+IPP_REAP_URL="${IPP_REAP_URL:-http://127.0.0.1:3002}"
 # Must match ipp.upload.maxFileSizeMb in test/immich-stack.yml.
 UPLOAD_MAX_MB="${UPLOAD_MAX_MB:-2}"
 # Must match ipp.upload.maxConcurrent in test/immich-stack.yml.
@@ -51,6 +52,7 @@ wait_for () {
 wait_for immich "$IMMICH_URL/api/server/ping"
 wait_for ipp "$IPP_URL/share/healthcheck"
 wait_for ipp-slug "$IPP_SLUG_URL/share/healthcheck"
+wait_for ipp-reap "$IPP_REAP_URL/share/healthcheck"
 
 # An empty instance accepts exactly one admin sign-up; a second returns 400,
 # which is fine if we are re-running against a stack that is already set up.
@@ -92,6 +94,7 @@ ${prefix}E2E_IMMICH_URL=$IMMICH_URL
 ${prefix}E2E_IMMICH_API_KEY=$API_KEY
 ${prefix}E2E_IPP_URL=$IPP_URL
 ${prefix}E2E_IPP_SLUG_URL=$IPP_SLUG_URL
+${prefix}E2E_IPP_REAP_URL=$IPP_REAP_URL
 ${prefix}E2E_UPLOAD_MAX_MB=$UPLOAD_MAX_MB
 ${prefix}E2E_UPLOAD_MAX_CONCURRENT=$UPLOAD_MAX_CONCURRENT
 EOF

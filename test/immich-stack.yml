@@ -117,5 +117,30 @@ services:
       timeout: 5s
       retries: 30
 
+  # A third proxy whose admission slots are bounded aggressively, so the
+  # "a wedged connection gives its slot back" test runs in seconds instead of
+  # the two minutes the production default would need. maxConcurrent is 1 so
+  # a single stalled socket is enough to exhaust the budget.
+  ipp-reap:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    environment:
+      IMMICH_URL: http://immich:2283
+      CONFIG: >-
+        {"ipp":{"showHomePage":false,"allowDownload":1,
+        "upload":{"enabled":true,"maxFileSizeMb":2,"maxConcurrent":1,
+        "idleTimeoutSeconds":10,"maxDurationSeconds":60}}}
+    ports:
+      - '127.0.0.1:3002:3000'
+    depends_on:
+      immich:
+        condition: service_healthy
+    healthcheck:
+      test: ['CMD-SHELL', 'node -e "fetch(\"http://localhost:3000/share/healthcheck\").then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"']
+      interval: 2s
+      timeout: 5s
+      retries: 30
+
 volumes:
   upload:

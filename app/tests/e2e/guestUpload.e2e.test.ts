@@ -13,6 +13,7 @@ environment contract; without it the whole file is skipped.
 
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import { createHash } from 'crypto'
+import net from 'net'
 import {
   E2EConfig,
   ImmichFixtures,
@@ -643,5 +644,65 @@ run('guest upload against a live Immich', () => {
       })
       expect([401, 404]).toContain(res.status)
     }, 60000)
+  })
+
+  describe('a connection that stops existing', () => {
+    /*
+     * The admission slot is released in a `finally`, which only runs once the
+     * handler settles. A visitor whose connection simply stops - a phone
+     * losing signal behind a reverse proxy - sends no FIN, so `res` 'close'
+     * never fires; and the round-trip to Immich has no deadline of its own.
+     * Nothing but a time bound can give that slot back, and without one the
+     * proxy answers 503 'busy' to every upload until it is restarted.
+     *
+     * ipp-reap exists for this test: maxConcurrent 1 so one stalled socket
+     * exhausts the budget, and a 10s idle bound so the recovery is observable
+     * in seconds rather than the two minutes the production default allows.
+     */
+    const reap = c.ippReapUrl
+    const onReap = it.skipIf(!reap)
+
+    onReap('gives its admission slot back instead of holding it for good', async () => {
+      const reapCfg: E2EConfig = { ...c, ippUrl: reap as string }
+      const url = new URL(reap as string)
+      const link = await fx.createShareLink(albumId, { allowUpload: true })
+
+      const attempt = async () => {
+        const res = await uploadToIpp(reapCfg, `/share/${link.key}`, makePng(24, 24, true, Date.now() % 1000), {
+          filename: 'probe.png', createdAt: CREATED_AT
+        })
+        if (res.status === 200) fx.track(((await res.json()) as { id: string }).id)
+        else await res.text().catch(() => '')
+        return res.status
+      }
+
+      // Headers plus a few bytes, then silence, socket held open.
+      const stalled = net.createConnection({ host: url.hostname, port: Number(url.port) })
+      await new Promise<void>((resolve, reject) => {
+        stalled.once('connect', () => resolve())
+        stalled.once('error', reject)
+      })
+      stalled.write(
+        `POST /share/${link.key}/upload HTTP/1.1\r\n` +
+        `Host: ${url.host}\r\n` +
+        'Content-Type: image/png\r\n' +
+        `X-IPP-Created-At: ${CREATED_AT}\r\n` +
+        // Comfortably under maxFileSizeMb, or the declared-size pre-check
+        // rejects the request before it ever takes a slot and the whole test
+        // passes on a race instead of on the bound.
+        'Content-Length: 1500000\r\n\r\n'
+      )
+      stalled.write(makePng(40, 40).subarray(0, 64))
+
+      try {
+        const wedged = await eventually(async () => (await attempt()) === 503, 15000, 500)
+        expect(wedged, 'the stalled socket never took the slot, so the rest proves nothing').toBe(true)
+
+        const recovered = await eventually(async () => (await attempt()) === 200, 45000, 1000)
+        expect(recovered, 'the slot was never released - uploads stay wedged').toBe(true)
+      } finally {
+        stalled.destroy()
+      }
+    }, 90000)
   })
 })

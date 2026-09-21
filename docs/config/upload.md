@@ -59,7 +59,9 @@ letting a visitor append to it is rarely what the owner meant.
     "upload": {
       "enabled": false,
       "maxFileSizeMb": 200,
-      "maxConcurrent": 2
+      "maxConcurrent": 2,
+      "idleTimeoutSeconds": 120,
+      "maxDurationSeconds": 1800
     }
   }
 }
@@ -70,11 +72,33 @@ letting a visitor append to it is rarely what the owner meant.
 | `enabled` | `false` | Instance-wide opt-in. |
 | `maxFileSizeMb` | `200` | Per-file ceiling, counted while streaming — a chunked request carries no `Content-Length`, so the declared size is only a cheap pre-check. |
 | `maxConcurrent` | `2` | Uploads relayed to Immich at once, across all visitors. |
+| `idleTimeoutSeconds` | `120` | Give an upload slot back once the connection has been silent this long. A slow upload keeps delivering bytes and never reaches it. Minimum 10. |
+| `maxDurationSeconds` | `1800` | Hard ceiling on how long one request may hold a slot. Minimum 60. |
 | `requireRandomKey` | `true` | Refuse `/s/<slug>` for writes. |
 | `requirePassword` | `false` | Refuse links with no password. Off by default. |
 | `requireExpiry` | `true` | Refuse links with no expiry, or already expired. |
 | `maxExpiryDays` | `30` | Refuse links expiring further out than this. `0` disables. |
 | `maxAssets` | `500` | Refuse once the album holds this many. `0` disables. |
+
+### Why the slot bounds exist
+
+`maxConcurrent` is admission control, and the slot is released in a `finally`
+— which only runs once the handler settles. Two things can stop it settling.
+A visitor whose connection merely *stops existing* — a phone losing signal
+behind a reverse proxy — sends no FIN, so the `close` event never fires; and
+the round-trip to Immich carries no deadline of its own. Either way the slot
+is held, and at `maxConcurrent` of them every upload answers `503 busy` until
+the proxy is restarted: one flaky mobile connection can wedge the whole write
+path.
+
+`idleTimeoutSeconds` arms the socket's own idle timer, so a connection that
+has gone quiet is reaped. `maxDurationSeconds` is the backstop for a socket
+that keeps *looking* alive. Both only ever abort a request — neither can let
+one through that the gate refused.
+
+Raise `idleTimeoutSeconds` if your Immich is slow enough to sit silent for
+more than two minutes on a single asset; that silence, not the transfer, is
+what the timer measures.
 
 ### Choosing `maxFileSizeMb`
 
