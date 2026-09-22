@@ -476,4 +476,35 @@ test.describe('guest upload in the browser', () => {
     await expect(dated).toContainText('Added', { timeout: 60000 })
     await expect(dated).not.toContainText('no date in the file')
   })
+
+  test('blames the right thing when a gateway cuts the transfer', async ({ page }) => {
+    /*
+     * A reverse proxy whose read timeout elapses mid-upload answers 502 with
+     * an HTML page, after the whole file has already gone up. IPP never sees
+     * it - the cut is on the visitor's side of the proxy - so the response
+     * carries no machine reason and the row used to fall back to a flat
+     * "Could not be uploaded". That reads as "your file was rejected", which
+     * sends the visitor looking for a problem with the photo instead of
+     * pressing retry.
+     */
+    await page.goto(`${cfg!.ippUrl}/share/${uploadKey}`)
+    await page.route('**/upload', route => route.fulfill({
+      status: 502,
+      contentType: 'text/html',
+      body: '<html><body><h1>Bad Gateway</h1></body></html>'
+    }))
+
+    const chooser = page.waitForEvent('filechooser')
+    await page.getByRole('button', { name: 'Add photos' }).click()
+    await (await chooser).setFiles([
+      { name: 'cut-off.png', mimeType: 'image/png', buffer: makePng(80, 60, false, 91) }
+    ])
+
+    const row = page.locator('#upload-files li', { hasText: 'cut-off.png' })
+    await expect(row).toHaveClass(/upload-item-failed/, { timeout: 30000 })
+    await expect(row).toContainText('Interrupted on the way')
+    await expect(row, 'a cut transfer is not a refusal').not.toContainText('refused')
+    // The visitor must be able to act on it without reloading the page.
+    await expect(row.locator('.upload-retry')).toBeVisible()
+  })
 })

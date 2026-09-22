@@ -196,11 +196,29 @@ So the number encodes a policy, not a technical limit:
   video (a clip that small is a few seconds of 1080p).
 - **200 MB** — the default — covers photos plus the short clips people
   actually send. This is the right choice if you expect videos.
-- Beyond that you are mostly widening the worst case for no practical gain.
+- **500 MB** covers full-length phone video. Only worth it if your reverse
+  proxy lets a transfer run that long — see below.
 
 Pair it with `maxAssets`: at 200 MB and a 500-asset ceiling, a leaked link
 costs at most ~100 GB before it stops accepting anything, and expires by
 itself within `maxExpiryDays`.
+
+**Check your reverse proxy before raising this.** The ceiling that bites first
+is usually not IPP's but a time limit upstream of it. Traefik v3, for example,
+defaults `entryPoints.<name>.transport.respondingTimeouts.readTimeout` to
+`60s`, and that clock covers *reading the entire request, body included* — so
+any upload lasting over a minute is cut with a `502`, whatever its size. The
+symptom is confusing because it is not size-related: a 150 MB file on a fast
+link succeeds while an 8 MB file on a slow one fails.
+
+Work out the budget from the uplink, not the file size. 500 MB needs roughly
+2.5 Mbit/s to finish inside 1800 s. If your visitors are on mobile, a lower
+`maxFileSizeMb` that completes beats a higher one that times out.
+
+Note also that files above 200 MB skip the duplicate pre-check
+(`shared/precheck.ts`): hashing needs the whole file in memory at once, and an
+out-of-memory kill on a phone would take the entire queue with it, not just
+the check.
 
 ## How it works
 
@@ -505,6 +523,13 @@ album, so the wording is "already uploaded", not "already in this album".
 album owner are three different next steps. So failures name the file and the
 cause.
 
+A gateway error carrying no machine reason did not come from IPP, which always
+answers its own refusals as JSON. It means something between the visitor and
+the proxy ended the request — a reverse proxy read timeout elapsing mid-upload
+is the usual cause, and it lands *after* the whole file has gone up. Calling
+that "refused" would blame the wrong component and send the visitor looking
+for a problem with their photo; the row offers retry instead.
+
 **Two kinds of failure, answered differently on purpose.** A share that does
 not resolve — wrong key, missing password — gets the generic empty response,
 so probing for valid links learns nothing. Once a share *has* resolved, the
@@ -522,6 +547,7 @@ telling them why the upload was refused leaks nothing new.
 | Empty file | `400 empty` | File is empty |
 | Too many at once | `503 busy` | (held and retried after `Retry-After`) |
 | Immich refused it | `502 upstream` | The photo server refused it |
+| Cut in transit | `502`/`504`, no reason | Interrupted on the way — try again |
 | Stopped mid-transfer | — | Stopped — may have been added |
 
 Size and emptiness are caught **in the browser, before a byte is sent**.

@@ -99,6 +99,16 @@ export function uploadFile (opts: UploadRequestOptions): Promise<UploadOutcome> 
       // XHR does not turn a 4xx/5xx into an error event; classify here.
       let reason: string | undefined
       try { reason = JSON.parse(xhr.responseText)?.reason } catch (e) { /* empty body is allowed */ }
+      /*
+       * A gateway error carrying no machine reason did not come from IPP -
+       * IPP always answers its own refusals as JSON. It means something
+       * between the visitor and the proxy ended the request: a reverse proxy
+       * whose read timeout elapsed mid-upload is the usual one, and it lands
+       * after the whole file has already gone up. Saying "the photo server
+       * refused it" would blame the wrong component and imply the file was
+       * unacceptable, which it was not.
+       */
+      if (!reason && xhr.status >= 502 && xhr.status <= 504) reason = 'gateway'
       const retryAfter = Number(xhr.getResponseHeader('Retry-After'))
       finish({
         ok: false,

@@ -5,6 +5,7 @@
 // parallelism would only make every file finish later.
 
 import { state } from './state.js'
+import { shouldPreCheck } from '../shared/precheck.js'
 import {
   UploadOutcome,
   UploadProgress,
@@ -109,6 +110,9 @@ function explain (item: Item): string {
     case 'busy': return 'Server busy'
     case 'network': return 'Connection lost'
     case 'upstream': return 'The photo server refused it'
+    // Not a refusal: the transfer was cut in transit. Retry is worth offering,
+    // and the row's retry button is already there for the visitor to press.
+    case 'gateway': return 'Interrupted on the way — try again'
     case 'interrupted': return 'Stopped — may have been added'
     default: return 'Could not be uploaded'
   }
@@ -335,7 +339,7 @@ async function run (): Promise<void> {
     // afterwards anyway.
     controller = new AbortController()
 
-    if (canCheck) {
+    if (shouldPreCheck(item.file.size, canCheck)) {
       item.state = 'checking'
       item.progress = undefined
       renderItem(item); renderPanel()
