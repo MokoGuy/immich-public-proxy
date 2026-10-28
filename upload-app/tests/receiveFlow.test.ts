@@ -3,7 +3,7 @@ import { Readable } from 'stream'
 import { KeyType } from '@ipp/core'
 import { createUploadReceiver } from '../src/receive'
 import { flush, resetUploadReporting } from '../src/upload-log'
-import { resetConfig, share } from './helpers'
+import { resetConfig, setConfig, share } from './helpers'
 
 const PNG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13, 0x49, 0x48, 0x44, 0x52, 9, 9, 9, 9])
 const SECRET_NAME = 'jane-doe-private-IMG_0042.png'
@@ -80,5 +80,23 @@ describe('receiving an upload', () => {
     const log = output.join('\n')
     expect(log).toContain('bad-date=1')
     expect(log).not.toContain(SECRET_NAME)
+  })
+})
+
+describe('the share cache after an upload', () => {
+  it('drops both the submitted and the canonical identity of the share', async () => {
+    // A slug upload, so the two identities differ
+    setConfig({ ipp: { upload: { requireRandomKey: false } } })
+    const shareModule = await import('../src/share')
+    const spy = vi.spyOn(shareModule, 'invalidateShare')
+    const res = fakeRes()
+    const req = fakeReq(PNG)
+    ;(req.params as Record<string, string>).key = 'holiday-slug'
+    req.password = 'pw'
+    // @ts-expect-error minimal fakes
+    await createUploadReceiver()(req, res, share({ key: 'canonical-key' }), KeyType.slug, new AbortController().signal)
+    expect(res.statusCode).toBe(200)
+    expect(spy).toHaveBeenCalledWith('holiday-slug', KeyType.slug, 'pw')
+    expect(spy).toHaveBeenCalledWith('canonical-key', KeyType.key, 'pw')
   })
 })

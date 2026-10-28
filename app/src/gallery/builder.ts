@@ -1,4 +1,4 @@
-import { AssetType, getConfigOption, getNumericConfigOption, renderPage, SharedLink, title, toString } from '@ipp/core'
+import { addNoStoreHeaders, AssetType, getConfigOption, getNumericConfigOption, renderPage, SharedLink, title, toString } from '@ipp/core'
 import {
   getVideoContentType,
   photoUrl,
@@ -155,13 +155,27 @@ export async function gallery (res: Response, share: SharedLink, openItem?: numb
     uploadHealthcheck: uploadHealthcheck()
   }
 
-  // HTML gallery page cache time. A password-protected gallery keeps the
-  // no-store that handleShareRequest set.
-  if (!share.password) {
-    const cacheTime = Math.max(0, getNumericConfigOption('ipp.gallery.cacheTime', 300))
-    res.header('Cache-Control', 'public, max-age=' + cacheTime)
-  }
+  setGalleryCacheHeaders(res, share, !!props.uploadLink)
   res.send(renderPage(h(Gallery, props)))
+}
+
+/**
+ * Cache headers for a gallery page. A password-protected gallery keeps the
+ * no-store that handleShareRequest set. A gallery that takes uploads is
+ * no-store too: it changes whenever a visitor adds a photo, and a browser or
+ * shared cache holding it for `gallery.cacheTime` would show visitors an
+ * album without what they just sent, or an "Add photos" button for a link
+ * that has since filled up or expired. Anything else is public for
+ * `gallery.cacheTime`. Never downgrades a no-store.
+ */
+export function setGalleryCacheHeaders (res: Response, share: SharedLink, takesUploads: boolean): void {
+  if (takesUploads) {
+    addNoStoreHeaders(res)
+    return
+  }
+  if (share.password) return
+  const cacheTime = Math.max(0, getNumericConfigOption('ipp.gallery.cacheTime', 300))
+  res.header('Cache-Control', 'public, max-age=' + cacheTime)
 }
 
 /**

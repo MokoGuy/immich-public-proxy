@@ -11,3 +11,15 @@ const shareCache = new TtlLruCache<Promise<SharedLinkResult>>({ ttlMs: 60_000, m
 export function getShare (key: string, keyType: KeyType, password?: string): Promise<SharedLinkResult> {
   return cachedPromise(shareCache, `${keyType}:${key}:${password || ''}`, () => fetchSharedLink(key, keyType, password, { logKeys: false }), result => result.valid)
 }
+
+/**
+ * Drop a share's cached lookup after an upload changed it, so the next
+ * request sees the new asset count (the `maxAssets` cap) at once.
+ *
+ * A share reached by its slug is cached under the slug, and the same share
+ * reached by its key under the key, so `receive.ts` drops both identities:
+ * dropping only the one the upload came in by would leave the other stale.
+ */
+export function invalidateShare (key: string, keyType: KeyType, password?: string): void {
+  shareCache.delete(`${keyType}:${key}:${password || ''}`)
+}

@@ -9,6 +9,7 @@ import { authoriseUpload } from './gate'
 import { createIdleTimeoutStream, IdleTimeoutError } from './idleTimeoutStream'
 import { createWindowBudget } from './limits'
 import { buildNotification, sendNotification } from './notify'
+import { invalidateShare } from './share'
 import { formatSize, isUploadableName, isUploadableType } from './shared/upload'
 import { recordUpload, UploadLabel } from './upload-log'
 
@@ -173,6 +174,10 @@ export function createUploadReceiver () {
       refuse(res, stalled ? 502 : result.status, stalled ? 'The upload stalled. Try again.' : result.reason, stalled ? 'body-stalled' : result.label)
       return
     }
+
+    // The album changed: drop both cached identities of the share
+    invalidateShare(key, keyType, req.password)
+    if (link.key && link.key !== key) invalidateShare(link.key, KeyType.key, req.password)
 
     // Counted, never logged one by one: no filename, name or share reaches the log
     recordUpload(result.status)

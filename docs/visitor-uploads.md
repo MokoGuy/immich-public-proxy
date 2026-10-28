@@ -328,7 +328,8 @@ The owner sees them in Immich at once. Other visitors see them in the gallery on
 2. IPP's cache of the share has expired. It is kept for [`shareCacheTime`](/config/ipp-options#sharecachetime),
    2 minutes by default. You can lower it, at the cost of more calls to Immich.
 3. The visitor's browser has fetched the gallery page again. It keeps the page for
-   [`gallery.cacheTime`](/config/gallery#cachetime), 5 minutes by default.
+   [`gallery.cacheTime`](/config/gallery#cachetime), 5 minutes by default, except for a gallery that shows the
+   **Add photos** button: that page is sent `Cache-Control: no-store`, so browsers and CDNs fetch it afresh every time.
 
 So a new photo can take up to about 7 minutes to show for a visitor who already had the gallery open. The visitor
 who sent it skips step 3: after an upload, the upload page's "Back to gallery" link fetches a fresh copy of the
