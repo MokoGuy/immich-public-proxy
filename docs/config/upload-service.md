@@ -185,6 +185,31 @@ Extra headers sent with each notification, for example an `Authorization` header
 
 How long to wait for the notification URL to answer, in milliseconds.
 
+## `maxConcurrent`
+
+**Type:** `int` · **Default:** `2`
+
+Uploads the service handles at once, from all visitors together. One more
+is answered `503` with `Retry-After: 5` before any of its body is read, and the page waits and sends it again; the
+wait does not count against its three tries. Requests are refused rather than queued, so visitors holding a link
+cannot pile up connections until the service falls over. The smallest value is `1`.
+
+## `idleTimeoutSeconds`
+
+**Type:** `int` · **Default:** `120`
+
+How long an upload may go with nothing sent either way before it is dropped and its place under
+[`maxConcurrent`](#maxconcurrent) given back: a phone that lost its signal, or an Immich that stopped answering. A
+slow upload keeps sending and never reaches it. The smallest value is `10`.
+
+## `maxDurationSeconds`
+
+**Type:** `int` · **Default:** `1800`
+
+The longest one upload may take, after which it is dropped and its place given back, so a connection that keeps
+looking alive cannot hold a place for ever. Raise it for very large videos over slow links. The smallest value is
+`60`.
+
 ## `albumOnly`
 
 **Type:** `bool` · **Default:** `true`
@@ -257,3 +282,4 @@ one of these codes and a short reason, which the page shows to the visitor:
 | 415  | The file is not a photo or a video. SVG files are refused, by media type and by extension. A file whose first bytes do not match the signature of its declared type (a ZIP sent as `image/png`) is refused before any of it reaches Immich. |
 | 429  | The visitor is over `rateLimit`. `Retry-After` gives the wait in seconds.                                        |
 | 502  | Immich could not be reached, or failed.                                                                          |
+| 503  | Every place under `maxConcurrent` is taken. `Retry-After` gives the wait in seconds, and the body's `reason` is `busy`. |

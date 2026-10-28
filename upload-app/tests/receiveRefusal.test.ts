@@ -28,7 +28,7 @@ describe('a refused upload', () => {
     const receive = createUploadReceiver()
     const res = fakeRes()
     // @ts-expect-error minimal fakes
-    await receive(fakeReq(), res, share({ album: { id: 'a', assetCount: 500 } }), KeyType.key)
+    await receive(fakeReq(), res, share({ album: { id: 'a', assetCount: 500 } }), KeyType.key, new AbortController().signal)
     expect(res.statusCode).toBe(403)
     expect(res.body).toEqual({ error: expect.stringMatching(/full/), reason: 'album-full' })
   })
@@ -37,7 +37,7 @@ describe('a refused upload', () => {
     const receive = createUploadReceiver()
     const res = fakeRes()
     // @ts-expect-error minimal fakes
-    await receive(fakeReq(), res, share({ allowUpload: false }), KeyType.key)
+    await receive(fakeReq(), res, share({ allowUpload: false }), KeyType.key, new AbortController().signal)
     expect(res.statusCode).toBe(404)
   })
 })

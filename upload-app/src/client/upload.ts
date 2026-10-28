@@ -197,7 +197,7 @@ function addRow (file: File, type: string): UploadRow {
 type Attempt =
   | { outcome: 'sent', duplicate: boolean, dateless: boolean }
   | { outcome: 'failed', message: string, retryable: boolean, linkRefused?: boolean }
-  | { outcome: 'retry', waitMs: number }
+  | { outcome: 'retry', waitMs: number, busy?: boolean }
   | { outcome: 'cancelled' }
 
 /** The visitor-facing reason for a refused upload. */
@@ -217,10 +217,14 @@ function failureMessage (xhr: XMLHttpRequest): string {
  * `Retry-After`). A refused file or a closed share fails the same way every
  * time, so those rows get Dismiss rather than Retry.
  */
+/** The machine-readable `reason` of a refusal, when the upload service sent one. */
+function replyReason (xhr: XMLHttpRequest): string | undefined {
+  try { return (JSON.parse(xhr.responseText) as Partial<UploadErrorResponse>).reason } catch { return undefined }
+}
+
 function failure (xhr: XMLHttpRequest): Attempt {
   const retryable = xhr.status >= 500 || xhr.getResponseHeader('Retry-After') !== null
-  let reason: string | undefined
-  try { reason = (JSON.parse(xhr.responseText) as Partial<UploadErrorResponse>).reason } catch { }
+  const reason = replyReason(xhr)
   const linkRefused = xhr.status === 403 && !!reason && LINK_REFUSAL_REASONS.includes(reason)
   return { outcome: 'failed', message: failureMessage(xhr), retryable, linkRefused }
 }
@@ -271,6 +275,10 @@ function attempt (row: UploadRow, attemptNumber: number): Promise<Attempt> {
       } else if (xhr.status === 429) {
         const seconds = Number(xhr.getResponseHeader('Retry-After'))
         resolve(Number.isFinite(seconds) && seconds > 0 ? { outcome: 'retry', waitMs: seconds * 1000 } : backoff)
+      } else if (xhr.status === 503 && replyReason(xhr) === 'busy') {
+        // Every upload slot is taken: wait the server out, without spending a try
+        const seconds = Number(xhr.getResponseHeader('Retry-After'))
+        resolve({ outcome: 'retry', waitMs: (Number.isFinite(seconds) && seconds > 0 ? seconds : 5) * 1000, busy: true })
       } else {
         resolve(failure(xhr))
       }
@@ -316,12 +324,13 @@ async function sendFile (row: UploadRow) {
       if (result.linkRefused) refuseLink(result.message)
       return
     }
-    if (attemptNumber >= ATTEMPTS || result.waitMs > MAX_RETRY_WAIT_MS) {
+    if (result.busy) attemptNumber--
+    else if (attemptNumber >= ATTEMPTS || result.waitMs > MAX_RETRY_WAIT_MS) {
       finish(row, 'error', 'Could not be sent. Try again later.', true)
       return
     }
     setState(row, 'pending')
-    showProgress(row, 'Waiting to retry', 0)
+    showProgress(row, result.busy ? 'Server busy, waiting' : 'Waiting to retry', 0)
     waiting.add(row)
     await waitToRetry(row, result.waitMs)
     waiting.delete(row)

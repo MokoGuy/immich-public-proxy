@@ -2,7 +2,7 @@
 
 import 'dotenv/config'
 import express, { RequestHandler, Router } from 'express'
-import { Request } from 'express-serve-static-core'
+import { Request, Response } from 'express-serve-static-core'
 import { resolve } from 'path'
 import dayjs from 'dayjs'
 import { h } from 'preact'
@@ -28,7 +28,8 @@ import {
   title,
   unlockHandler
 } from '@ipp/core'
-import { askName, galleryUrl, maxFileSize, uploadNotice } from './config'
+import { boundSlot, createAdmission } from './admission'
+import { askName, galleryUrl, maxConcurrent, maxFileSize, slotIdleMs, slotMaxMs, uploadNotice } from './config'
 import { uploadAllowed } from './gate'
 import { createUploadReceiver } from './receive'
 import { getShare } from './share'
@@ -43,6 +44,11 @@ import { UploadPage } from './view/upload'
 loadConfig({ defaultPath: resolve(__dirname, '../config.json') })
 
 const receiveUpload = createUploadReceiver()
+const admission = createAdmission(maxConcurrent())
+const idleMs = slotIdleMs()
+const maxMs = slotMaxMs()
+// How long a visitor refused for capacity is told to wait
+const BUSY_RETRY_SECONDS = 5
 const inProduction = process.env.NODE_ENV === 'production'
 
 const app = express()
@@ -152,16 +158,48 @@ router.get('/:shareType(share|s)/:key', decodeCookie, asyncHandler(async (req, r
 */
 router.post('/share/unlock', bodyDeadline(10_000), express.json({ limit: '10kb' }), unlockHandler)
 
+/**
+ * Run a handler that writes to Immich inside an admission slot (see
+ * `admission.ts`). The slot is reserved before the first `await`, so the cap
+ * holds under concurrency, and it always comes back: when the handler
+ * settles, or when the idle or total bound aborts it. A request over
+ * capacity is answered 503 before its body is read.
+ */
+function admitted (handler: (req: Request, res: Response, signal: AbortSignal) => Promise<void>): RequestHandler {
+  return asyncHandler(async (req, res) => {
+    const release = admission.tryAcquire()
+    if (!release) {
+      res.set('Retry-After', String(BUSY_RETRY_SECONDS))
+      res.status(503).json({ error: 'The server is busy. The page will try again.', reason: 'busy' })
+      return
+    }
+    const abort = new AbortController()
+    const onClose = () => { if (!res.writableFinished) abort.abort('client-gone') }
+    res.on('close', onClose)
+    if (res.closed) onClose()
+    const unbind = boundSlot(req.socket, abort, idleMs, maxMs)
+    try {
+      await handler(req, res, abort.signal)
+    } finally {
+      release()
+      unbind()
+      res.off('close', onClose)
+      // A bound fired and nobody will answer: drop the connection rather than leave it hanging
+      if (abort.signal.aborted && !res.writableEnded) res.destroy()
+    }
+  })
+}
+
 /*
   [ROUTE] One file from a visitor, streamed to Immich
 */
-router.post('/:shareType(share|s)/:key/upload', decodeCookie, asyncHandler(async (req, res) => {
+router.post('/:shareType(share|s)/:key/upload', decodeCookie, admitted(async (req, res, signal) => {
   const resolved = await resolveShare(req)
   if (!resolved.ok) {
     respondToInvalidRequest(res, 404, resolved.reason)
     return
   }
-  await receiveUpload(req, res, resolved.link, resolved.keyType)
+  await receiveUpload(req, res, resolved.link, resolved.keyType, signal)
 }))
 
 /*

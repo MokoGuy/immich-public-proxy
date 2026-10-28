@@ -27,6 +27,21 @@ export function byteBudget (): number {
   return Math.max(0, getNumericConfigOption('ipp.upload.byteBudget', 10240)) * MB
 }
 
+/** Requests that may write to Immich at once, from `ipp.upload.maxConcurrent`. */
+export function maxConcurrent (): number {
+  return Math.max(1, Math.floor(getNumericConfigOption('ipp.upload.maxConcurrent', 2)))
+}
+
+/** How long a request holding an upload slot may go without a byte either way, from `ipp.upload.idleTimeoutSeconds`. */
+export function slotIdleMs (): number {
+  return Math.max(10, getNumericConfigOption('ipp.upload.idleTimeoutSeconds', 120)) * 1000
+}
+
+/** The longest one request may hold an upload slot, from `ipp.upload.maxDurationSeconds`. */
+export function slotMaxMs (): number {
+  return Math.max(60, getNumericConfigOption('ipp.upload.maxDurationSeconds', 1800)) * 1000
+}
+
 /** Prefix for every stored filename, from `ipp.upload.filenamePrefix`. */
 export function filenamePrefix (): string {
   const configured = getConfigOption('ipp.upload.filenamePrefix', 'ipp_upload_')

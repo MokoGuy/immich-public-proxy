@@ -61,7 +61,9 @@ export const LABELS: Record<string, string> = {
   'ipp.upload.rateLimit': 'Rate limit (files per minute)',
   'ipp.upload.byteBudget': 'Byte budget (MB per hour)',
   'ipp.upload.notifyTimeout': 'Notify timeout (ms)',
-  'ipp.upload.maxExpiryDays': 'Max expiry (days)'
+  'ipp.upload.maxExpiryDays': 'Max expiry (days)',
+  'ipp.upload.idleTimeoutSeconds': 'Idle timeout (seconds)',
+  'ipp.upload.maxDurationSeconds': 'Max duration (seconds)'
 }
 
 /**

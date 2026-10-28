@@ -1,7 +1,7 @@
 import { pipeline } from 'stream'
 import { Request, Response } from 'express-serve-static-core'
 import dayjs from 'dayjs'
-import { abortOnClose, KeyType, log, respondToInvalidRequest, SharedLink, uploadRefusal, uploadRefusalMessage } from '@ipp/core'
+import { KeyType, log, respondToInvalidRequest, SharedLink, uploadRefusal, uploadRefusalMessage } from '@ipp/core'
 import { askName, byteBudget, fieldSeparator, filenamePrefix, maxFileSize, rateLimit } from './config'
 import { uploaderSlug, uploadFilename } from './filename'
 import { forwardUpload } from './forward'
@@ -79,7 +79,7 @@ export function createUploadReceiver () {
   const withName = askName()
   const separator = fieldSeparator()
 
-  return async function receiveUpload (req: Request, res: Response, link: SharedLink, keyType: KeyType): Promise<void> {
+  return async function receiveUpload (req: Request, res: Response, link: SharedLink, keyType: KeyType, signal: AbortSignal): Promise<void> {
     const key = req.params.key
     const permit = authoriseUpload(link, key, keyType, req.password)
     if (!permit) {
@@ -157,7 +157,7 @@ export function createUploadReceiver () {
       fileModifiedAt: uploadTimestamp(req.query.fileModifiedAt),
       body,
       maxBytes: length
-    }, abortOnClose(res))
+    }, signal)
 
     if (!result.ok) {
       reserved.release()
