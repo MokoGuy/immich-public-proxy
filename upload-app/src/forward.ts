@@ -2,6 +2,7 @@ import { Readable } from 'stream'
 import crypto from 'crypto'
 import { apiUrl, authHeaders, buildUrl, log, streamingRequestInit } from '@ipp/core'
 import { UploadPermit, assertPermit } from './gate'
+import { matchesDeclaredType, SNIFF_BYTES } from './sniff'
 
 /**
  * Everything forwarded about one file, already validated by `receive.ts`.
@@ -24,9 +25,25 @@ export type ForwardResult =
   | { ok: false, status: number, reason: string }
 
 export const NOT_ACCEPTING_UPLOADS = 'This share does not accept uploads'
+export const NOT_MEDIA = 'The file\'s content does not match its type'
 
 /** Thrown by the body generator when an upload runs past `maxBytes`. */
 class UploadTooLargeError extends Error {}
+
+/** Thrown by the body generator when the leading bytes contradict the declared type. */
+class UploadNotMediaError extends Error {}
+
+/*
+  What the body generator found, recorded where it happens. fetch wraps an
+  error thrown by a streaming request body in `TypeError('fetch failed')`,
+  and undici may wrap it again, so the outcome is classified from these flags
+  rather than from the error that comes out of fetch.
+*/
+interface BodyState {
+  bytes: number
+  overflowed: boolean
+  notMedia: boolean
+}
 
 /**
  * Serialise one multipart/form-data body for Immich's `POST /assets`. The
@@ -38,14 +55,14 @@ class UploadTooLargeError extends Error {}
  * `sidecarData`) cannot be set by a visitor. The filename rides on the
  * part's own Content-Disposition, which is where Immich reads it from.
  */
-function multipartBody (boundary: string, upload: IncomingUpload, counter: { bytes: number }): Readable {
+function multipartBody (boundary: string, upload: IncomingUpload, state: BodyState): Readable {
   const fields: Record<string, string> = {
     fileCreatedAt: upload.fileCreatedAt,
     fileModifiedAt: upload.fileModifiedAt
   }
   const part = (headers: string) => Buffer.from(`--${boundary}\r\n${headers}\r\n\r\n`)
 
-  async function * generate () {
+  function * preamble () {
     for (const [name, value] of Object.entries(fields)) {
       yield part(`Content-Disposition: form-data; name="${name}"`)
       yield Buffer.from(value + '\r\n')
@@ -54,10 +71,40 @@ function multipartBody (boundary: string, upload: IncomingUpload, counter: { byt
       `Content-Disposition: form-data; name="assetData"; filename="${upload.filename}"\r\n` +
       `Content-Type: ${upload.mimeType}`
     )
+  }
+
+  async function * generate () {
+    // The leading bytes are held back until the type check has run, so a
+    // file that is not what it claims never reaches Immich at all
+    let head: Buffer | null = Buffer.alloc(0)
     for await (const chunk of upload.body) {
-      counter.bytes += chunk.length
-      if (counter.bytes > upload.maxBytes) throw new UploadTooLargeError()
+      state.bytes += chunk.length
+      if (state.bytes > upload.maxBytes) {
+        state.overflowed = true
+        throw new UploadTooLargeError()
+      }
+      if (head) {
+        head = Buffer.concat([head, chunk])
+        if (head.length < SNIFF_BYTES) continue
+        if (!matchesDeclaredType(upload.mimeType, head)) {
+          state.notMedia = true
+          throw new UploadNotMediaError()
+        }
+        yield * preamble()
+        yield head
+        head = null
+        continue
+      }
       yield chunk
+    }
+    if (head) {
+      // The whole file was shorter than the check needs
+      if (!matchesDeclaredType(upload.mimeType, head)) {
+        state.notMedia = true
+        throw new UploadNotMediaError()
+      }
+      yield * preamble()
+      yield head
     }
     yield Buffer.from(`\r\n--${boundary}--\r\n`)
   }
@@ -90,9 +137,10 @@ export async function forwardUpload (permit: UploadPermit, upload: IncomingUploa
   assertPermit(permit)
 
   const boundary = '----IPPUpload' + crypto.randomBytes(16).toString('hex')
-  const counter = { bytes: 0 }
+  const state: BodyState = { bytes: 0, overflowed: false, notMedia: false }
   const url = buildUrl(apiUrl() + '/assets', { [permit.keyType]: permit.key })
 
+  const multipart = multipartBody(boundary, upload, state)
   let res: globalThis.Response
   try {
     res = await fetch(url, streamingRequestInit({
@@ -102,18 +150,25 @@ export async function forwardUpload (permit: UploadPermit, upload: IncomingUploa
         ...(await authHeaders(permit.keyType, permit.key, permit.password))
       },
       signal
-    }, multipartBody(boundary, upload, counter)))
+    }, multipart))
   } catch (e) {
-    // The generator's throw surfaces here as the fetch rejecting
-    if (causedBy(e, UploadTooLargeError)) return { ok: false, status: 413, reason: 'File is larger than declared' }
+    // The generator's throw surfaces here as the fetch rejecting, wrapped
+    if (state.overflowed || causedBy(e, UploadTooLargeError)) return { ok: false, status: 413, reason: 'File is larger than declared' }
+    if (state.notMedia || causedBy(e, UploadNotMediaError)) return { ok: false, status: 415, reason: NOT_MEDIA }
     if (signal.aborted) return { ok: false, status: 499, reason: 'Visitor cancelled the upload' }
     log.warn('Upload to Immich failed for ' + upload.filename + ': ' + errorText(e))
     return { ok: false, status: 502, reason: 'Could not reach Immich' }
+  } finally {
+    // Immich may answer before the body is through; stop pulling from the visitor
+    if (!multipart.readableEnded) multipart.destroy()
   }
 
   const body = await res.json().catch(() => null) as { id?: string, status?: string, message?: string } | null
+  // An early answer to a body the generator gave up on: the flag is the truth
+  if (state.overflowed) return { ok: false, status: 413, reason: 'File is larger than declared' }
+  if (state.notMedia) return { ok: false, status: 415, reason: NOT_MEDIA }
   const result = replyForImmichStatus(res.status, body)
-  if (result.ok) return { ...result, bytes: counter.bytes }
+  if (result.ok) return { ...result, bytes: state.bytes }
   log.warn('Immich refused upload ' + upload.filename + ' with status ' + res.status +
     (body?.message ? ': ' + body.message : ''))
   return result

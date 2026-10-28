@@ -254,6 +254,6 @@ one of these codes and a short reason, which the page shows to the visitor:
 | 403  | The share no longer accepts uploads, or the link fails the upload policy above, for example the album is full or the link has expired. The body also carries a `reason` code. |
 | 411  | The request has no `Content-Length` header.                                                                      |
 | 413  | The file is larger than `maxFileSize`, sent more bytes than its `Content-Length` declared, or the share has used its `byteBudget` for the hour. |
-| 415  | The file is not a photo or a video. SVG files are refused, by media type and by extension.                       |
+| 415  | The file is not a photo or a video. SVG files are refused, by media type and by extension. A file whose first bytes do not match the signature of its declared type (a ZIP sent as `image/png`) is refused before any of it reaches Immich. |
 | 429  | The visitor is over `rateLimit`. `Retry-After` gives the wait in seconds.                                        |
 | 502  | Immich could not be reached, or failed.                                                                          |
