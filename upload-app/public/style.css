@@ -257,6 +257,11 @@ html.dark .upload-bar {
   color: var(--color-danger);
 }
 
+.upload-row-note {
+  margin: 0;
+  color: var(--color-warning);
+}
+
 @keyframes upload-spin {
   to { transform: rotate(360deg); }
 }

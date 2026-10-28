@@ -3,6 +3,7 @@ import crypto from 'crypto'
 import { apiUrl, authHeaders, buildUrl, log, streamingRequestInit } from '@ipp/core'
 import { UploadPermit, assertPermit } from './gate'
 import { matchesDeclaredType, SNIFF_BYTES } from './sniff'
+import { CaptureDate, captureDate, DateSource, noteParserFailure } from './capture-date'
 
 /**
  * Everything forwarded about one file, already validated by `receive.ts`.
@@ -21,7 +22,7 @@ export interface IncomingUpload {
 }
 
 export type ForwardResult =
-  | { ok: true, status: 'created' | 'duplicate', id: string, bytes: number }
+  | { ok: true, status: 'created' | 'duplicate', id: string, bytes: number, dateSource?: DateSource }
   | { ok: false, status: number, reason: string }
 
 export const NOT_ACCEPTING_UPLOADS = 'This share does not accept uploads'
@@ -43,7 +44,18 @@ interface BodyState {
   bytes: number
   overflowed: boolean
   notMedia: boolean
+  /** Where `fileCreatedAt` came from, once the preamble is written. */
+  dateSource?: DateSource
 }
+
+/*
+  How much of the file is held back before the multipart fields go out.
+  `fileCreatedAt` is written before the bytes, so the capture date has to be
+  known by then, and it lives in the EXIF block near the start of the file.
+  128 KiB covers a JPEG APP1 segment and a HEIC meta box; it is held per
+  upload in flight, which `maxConcurrent` bounds.
+*/
+const HEAD_BYTES = 128 * 1024
 
 /**
  * Serialise one multipart/form-data body for Immich's `POST /assets`. The
@@ -56,13 +68,30 @@ interface BodyState {
  * part's own Content-Disposition, which is where Immich reads it from.
  */
 function multipartBody (boundary: string, upload: IncomingUpload, state: BodyState): Readable {
-  const fields: Record<string, string> = {
-    fileCreatedAt: upload.fileCreatedAt,
-    fileModifiedAt: upload.fileModifiedAt
-  }
   const part = (headers: string) => Buffer.from(`--${boundary}\r\n${headers}\r\n\r\n`)
 
-  function * preamble () {
+  /*
+    The fields, once the head is in hand. Immich dates an asset from
+    DateTimeOriginal or CreateDate when the file has one, and otherwise keeps
+    `fileCreatedAt`, which the browser can only fill from `lastModified`: for
+    a copy handed over by a phone's photo picker, the moment of the export.
+    So the date is read from the file here, DateTime included, which Immich
+    ignores but which beats the upload clock.
+  */
+  function * preamble (head: Buffer) {
+    let when: CaptureDate
+    try {
+      when = captureDate(head, upload.mimeType, upload.fileCreatedAt)
+    } catch {
+      // The parser must never be able to fail an upload
+      noteParserFailure()
+      when = { iso: upload.fileCreatedAt, source: 'client' }
+    }
+    state.dateSource = when.source
+    const fields: Record<string, string> = {
+      fileCreatedAt: when.iso,
+      fileModifiedAt: upload.fileModifiedAt
+    }
     for (const [name, value] of Object.entries(fields)) {
       yield part(`Content-Disposition: form-data; name="${name}"`)
       yield Buffer.from(value + '\r\n')
@@ -77,6 +106,7 @@ function multipartBody (boundary: string, upload: IncomingUpload, state: BodySta
     // The leading bytes are held back until the type check has run, so a
     // file that is not what it claims never reaches Immich at all
     let head: Buffer | null = Buffer.alloc(0)
+    let sniffed = false
     for await (const chunk of upload.body) {
       state.bytes += chunk.length
       if (state.bytes > upload.maxBytes) {
@@ -85,12 +115,17 @@ function multipartBody (boundary: string, upload: IncomingUpload, state: BodySta
       }
       if (head) {
         head = Buffer.concat([head, chunk])
-        if (head.length < SNIFF_BYTES) continue
-        if (!matchesDeclaredType(upload.mimeType, head)) {
-          state.notMedia = true
-          throw new UploadNotMediaError()
+        // The type check runs as soon as it can, so a file that is not
+        // media dies before 128 KiB of it is held
+        if (!sniffed && head.length >= SNIFF_BYTES) {
+          if (!matchesDeclaredType(upload.mimeType, head)) {
+            state.notMedia = true
+            throw new UploadNotMediaError()
+          }
+          sniffed = true
         }
-        yield * preamble()
+        if (head.length < HEAD_BYTES) continue
+        yield * preamble(head)
         yield head
         head = null
         continue
@@ -99,11 +134,11 @@ function multipartBody (boundary: string, upload: IncomingUpload, state: BodySta
     }
     if (head) {
       // The whole file was shorter than the check needs
-      if (!matchesDeclaredType(upload.mimeType, head)) {
+      if (!sniffed && !matchesDeclaredType(upload.mimeType, head)) {
         state.notMedia = true
         throw new UploadNotMediaError()
       }
-      yield * preamble()
+      yield * preamble(head)
       yield head
     }
     yield Buffer.from(`\r\n--${boundary}--\r\n`)
@@ -168,7 +203,7 @@ export async function forwardUpload (permit: UploadPermit, upload: IncomingUploa
   if (state.overflowed) return { ok: false, status: 413, reason: 'File is larger than declared' }
   if (state.notMedia) return { ok: false, status: 415, reason: NOT_MEDIA }
   const result = replyForImmichStatus(res.status, body)
-  if (result.ok) return { ...result, bytes: state.bytes }
+  if (result.ok) return { ...result, bytes: state.bytes, dateSource: state.dateSource }
   log.warn('Immich refused upload ' + upload.filename + ' with status ' + res.status +
     (body?.message ? ': ' + body.message : ''))
   return result

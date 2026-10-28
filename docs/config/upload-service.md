@@ -250,7 +250,7 @@ one of these codes and a short reason, which the page shows to the visitor:
 
 | Code | Reason                                                                                                           |
 |------|------------------------------------------------------------------------------------------------------------------|
-| 400  | The file is empty, the filename has no extension, or Immich refused the file, for example because the owner's storage quota is full. |
+| 400  | The file is empty, the filename has no extension, its date is more than a day in the future, or Immich refused the file, for example because the owner's storage quota is full. |
 | 403  | The share no longer accepts uploads, or the link fails the upload policy above, for example the album is full or the link has expired. The body also carries a `reason` code. |
 | 411  | The request has no `Content-Length` header.                                                                      |
 | 413  | The file is larger than `maxFileSize`, sent more bytes than its `Content-Length` declared, or the share has used its `byteBudget` for the hour. |

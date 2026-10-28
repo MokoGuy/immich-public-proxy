@@ -93,6 +93,12 @@ export interface UploadPageConfig {
 /** Success body of `POST <share>/upload`. */
 export interface UploadResponse {
   status: 'created' | 'duplicate'
+  /**
+   * Where the stored capture date came from: `exif-*` from the file,
+   * `client` when the file had none and the browser's date stands,
+   * `not-inspected` for a video, whose date Immich reads itself.
+   */
+  dateSource?: string
 }
 
 /** Failure body of `POST <share>/upload`. */

@@ -92,3 +92,32 @@ describe('forwardUpload', () => {
     expect(result).toMatchObject({ ok: false, status: 413 })
   })
 })
+
+describe('the capture date sent to Immich', () => {
+  it('comes from the file\'s EXIF when it has one, not from the browser', async () => {
+    const { jpegWithExif, TAG } = await import('./fixtures/exifJpeg')
+    const jpeg = jpegWithExif([[TAG.make, 'Google']], [[TAG.dateTimeOriginal, '2024:05:06 07:08:09'], [TAG.offsetTimeOriginal, '+02:00']])
+    const seen = stubImmich()
+    const result = await forwardUpload(permit(), upload(jpeg, 'image/jpeg', 1000), new AbortController().signal)
+    expect(result).toMatchObject({ ok: true, dateSource: 'exif-original' })
+    const text = seen.body!.toString('latin1')
+    expect(text).toMatch(/name="fileCreatedAt"\r\n\r\n2024-05-06T05:08:09.000Z\r\n/)
+    // The modification time stays the browser's
+    expect(text).toMatch(/name="fileModifiedAt"\r\n\r\n2026-01-01T00:00:00.000Z\r\n/)
+  })
+
+  it('stays the browser\'s, and says so, when the file has none', async () => {
+    const seen = stubImmich()
+    const result = await forwardUpload(permit(), upload(PNG, 'image/png'), new AbortController().signal)
+    expect(result).toMatchObject({ ok: true, dateSource: 'client' })
+    expect(seen.body!.toString('latin1')).toMatch(/name="fileCreatedAt"\r\n\r\n2026-01-01T00:00:00.000Z\r\n/)
+  })
+
+  it('reads the head across more than 128 KiB of chunks and relays every byte', async () => {
+    const big = Buffer.concat([PNG, Buffer.alloc(300 * 1024, 7)])
+    const seen = stubImmich()
+    const result = await forwardUpload(permit(), upload(big, 'image/png', 4096), new AbortController().signal)
+    expect(result).toMatchObject({ ok: true, bytes: big.length })
+    expect(seen.body!.includes(big)).toBe(true)
+  })
+})

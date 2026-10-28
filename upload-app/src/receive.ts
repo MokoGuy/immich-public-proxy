@@ -54,6 +54,16 @@ export function uploadTimestamp (raw: unknown): string {
 }
 
 /**
+ * Whether a visitor-supplied timestamp lies more than a day in the future: a
+ * broken clock, which must not file a holiday photo under the year 3000.
+ */
+export function isFutureTimestamp (raw: unknown): boolean {
+  if (typeof raw !== 'string' || !raw) return false
+  const parsed = dayjs(raw)
+  return parsed.isValid() && parsed.isAfter(dayjs().add(1, 'day'))
+}
+
+/**
  * Build the handler for `POST <share>/upload`, with its rate limit and byte
  * budget read from config. Called once, after the config has loaded.
  *
@@ -115,6 +125,11 @@ export function createUploadReceiver () {
       return
     }
 
+    if (isFutureTimestamp(req.query.fileCreatedAt) || isFutureTimestamp(req.query.fileModifiedAt)) {
+      refuse(res, 400, 'The file\'s date is in the future. Check the device\'s clock.')
+      return
+    }
+
     // Charged only once the request is one the service would take, so a
     // stream of malformed requests cannot use up everyone's allowance
     const rated = rate(req.ip + ':' + shareId)
@@ -153,7 +168,9 @@ export function createUploadReceiver () {
     }
 
     log('Received upload ' + filename + ' for share ' + (link.slug || link.id) + ' (Immich result: ' + result.status + ')')
-    res.json({ status: result.status })
+    // `client`: the file carried no date of its own, so the album shows it as
+    // taken when it was sent; the page tells the visitor while they are there
+    res.json({ status: result.status, dateSource: result.dateSource })
 
     // After the reply, so a slow webhook never holds up the visitor
     sendNotification(buildNotification(

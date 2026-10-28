@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import { fileType, formatSize, isUploadableName, isUploadableType } from '../src/shared/upload'
-import { declaredLength, uploadTimestamp } from '../src/receive'
+import { declaredLength, isFutureTimestamp, uploadTimestamp } from '../src/receive'
 
 describe('isUploadableType', () => {
   it('accepts photos and videos, with or without parameters', () => {
@@ -93,5 +93,14 @@ describe('uploadTimestamp', () => {
     for (const input of ['not a date', '', undefined, 42]) {
       expect(Number.isNaN(Date.parse(uploadTimestamp(input)))).toBe(false)
     }
+  })
+})
+
+describe('isFutureTimestamp', () => {
+  it('flags a date more than a day ahead, and nothing else', () => {
+    expect(isFutureTimestamp(new Date(Date.now() + 2 * 86_400_000).toISOString())).toBe(true)
+    expect(isFutureTimestamp(new Date(Date.now() + 3_600_000).toISOString())).toBe(false)
+    expect(isFutureTimestamp('2020-01-01T00:00:00Z')).toBe(false)
+    for (const input of ['not a date', '', undefined, 42]) expect(isFutureTimestamp(input)).toBe(false)
   })
 })

@@ -40,7 +40,10 @@ read-only.
 
 What the owner sees in Immich:
 
-- The files appear at once in the owner's timeline, at the date each photo was taken, as with any upload. They
+- The files appear at once in the owner's timeline, at the date each photo was taken, as with any upload. The upload
+  service reads that date from the photo's EXIF (`DateTimeOriginal`, then `CreateDate`, then `DateTime`) and sends
+  it to Immich, so a copy handed over by a phone's photo picker is not dated the moment it was sent. A photo with no
+  date at all is dated by the browser, and the upload page tells the visitor so. They
   belong to the owner and count against the owner's storage.
 - In an album share, the files go into the album. In a share of selected photos, they go into the shared link, so
   they show in the same gallery.

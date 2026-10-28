@@ -108,6 +108,14 @@ function showProgress (row: UploadRow, text: string, percent: number) {
   label.textContent = text
 }
 
+function showNote (row: UploadRow, message: string) {
+  clearDetail(row)
+  const p = document.createElement('p')
+  p.className = 'upload-row-detail upload-row-note'
+  p.textContent = message
+  row.li.appendChild(p)
+}
+
 function showError (row: UploadRow, message: string) {
   clearDetail(row)
   const p = document.createElement('p')
@@ -186,7 +194,7 @@ function addRow (file: File, type: string): UploadRow {
 }
 
 type Attempt =
-  | { outcome: 'sent', duplicate: boolean }
+  | { outcome: 'sent', duplicate: boolean, dateless: boolean }
   | { outcome: 'failed', message: string, retryable: boolean, linkRefused?: boolean }
   | { outcome: 'retry', waitMs: number }
   | { outcome: 'cancelled' }
@@ -258,7 +266,7 @@ function attempt (row: UploadRow, attemptNumber: number): Promise<Attempt> {
       if (xhr.status >= 200 && xhr.status < 300) {
         let reply: Partial<UploadResponse> | undefined
         try { reply = JSON.parse(xhr.responseText) } catch { }
-        resolve({ outcome: 'sent', duplicate: reply?.status === 'duplicate' })
+        resolve({ outcome: 'sent', duplicate: reply?.status === 'duplicate', dateless: reply?.dateSource === 'client' })
       } else if (xhr.status === 429) {
         const seconds = Number(xhr.getResponseHeader('Retry-After'))
         resolve(Number.isFinite(seconds) && seconds > 0 ? { outcome: 'retry', waitMs: seconds * 1000 } : backoff)
@@ -297,6 +305,9 @@ async function sendFile (row: UploadRow) {
     if (result.outcome === 'cancelled') return
     if (result.outcome === 'sent') {
       finish(row, result.duplicate ? 'duplicate' : 'done')
+      // Worth saying while the visitor is still here and can tell the owner:
+      // nobody can fix the date afterwards, and nobody else will notice
+      if (result.dateless && !result.duplicate) showNote(row, 'This file has no capture date, so it shows as taken today')
       return
     }
     if (result.outcome === 'failed') {
