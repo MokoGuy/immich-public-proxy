@@ -89,9 +89,13 @@ function multipartBody (boundary: string, upload: IncomingUpload, state: BodySta
       when = { iso: upload.fileCreatedAt, source: 'client' }
     }
     state.dateSource = when.source
+    // Both fields: with no capture tag of its own, Immich dates the asset by
+    // the earlier of the two, so a browser `lastModified` left in the second
+    // would win over the file's DateTime
+    const fromFile = when.source.startsWith('exif')
     const fields: Record<string, string> = {
       fileCreatedAt: when.iso,
-      fileModifiedAt: upload.fileModifiedAt
+      fileModifiedAt: fromFile ? when.iso : upload.fileModifiedAt
     }
     for (const [name, value] of Object.entries(fields)) {
       yield part(`Content-Disposition: form-data; name="${name}"`)

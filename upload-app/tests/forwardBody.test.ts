@@ -102,8 +102,8 @@ describe('the capture date sent to Immich', () => {
     expect(result).toMatchObject({ ok: true, dateSource: 'exif-original' })
     const text = seen.body!.toString('latin1')
     expect(text).toMatch(/name="fileCreatedAt"\r\n\r\n2024-05-06T05:08:09.000Z\r\n/)
-    // The modification time stays the browser's
-    expect(text).toMatch(/name="fileModifiedAt"\r\n\r\n2026-01-01T00:00:00.000Z\r\n/)
+    // And the modification time, or Immich would take the earlier browser date
+    expect(text).toMatch(/name="fileModifiedAt"\r\n\r\n2024-05-06T05:08:09.000Z\r\n/)
   })
 
   it('stays the browser\'s, and says so, when the file has none', async () => {

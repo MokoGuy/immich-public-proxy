@@ -181,7 +181,7 @@ export function createUploadReceiver () {
 
     // Counted, never logged one by one: no filename, name or share reaches the log
     recordUpload(result.status)
-    if (result.dateSource === 'client') recordUpload('no-capture-date')
+    if (result.status === 'created' && result.dateSource === 'client') recordUpload('no-capture-date')
     // `client`: the file carried no date of its own, so the album shows it as
     // taken when it was sent; the page tells the visitor while they are there
     res.json({ status: result.status, dateSource: result.dateSource })
