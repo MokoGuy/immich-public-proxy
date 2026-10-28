@@ -7,6 +7,7 @@
 // to the request body.
 
 import { createLimiter } from '../shared/limiter.js'
+import { acquireWakeLock, releaseWakeLock } from './wake-lock.js'
 import { fileType, formatSize, isUploadableName, isUploadableType, LINK_REFUSAL_REASONS } from '../shared/upload.js'
 import type { UploadErrorResponse, UploadPageConfig, UploadResponse } from '../shared/upload.js'
 import {
@@ -340,9 +341,12 @@ function queue (row: UploadRow) {
   setAction(row, 'cancel')
   clearDetail(row)
   stats.remaining++
+  // A phone that sleeps mid-queue suspends the page and kills the upload
+  if (stats.remaining === 1) acquireWakeLock().catch(() => undefined)
   updateSummary()
   run(() => row.cancelled ? Promise.resolve() : sendFile(row)).finally(() => {
     stats.remaining--
+    if (stats.remaining === 0) releaseWakeLock().catch(() => undefined)
     // A cancelled file leaves the batch altogether
     if (row.cancelled) stats.total--
     updateSummary()
