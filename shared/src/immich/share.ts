@@ -40,7 +40,9 @@ export function title (share: SharedLink): string {
  * is `{ valid: false }`; a 401 for anything other than a bad key is
  * `passwordRequired`.
  */
-export async function fetchSharedLink (key: string, keyType: KeyType = KeyType.key, password?: string): Promise<SharedLinkResult> {
+export async function fetchSharedLink (key: string, keyType: KeyType = KeyType.key, password?: string, opts: { logKeys?: boolean } = {}): Promise<SharedLinkResult> {
+  // The upload service keeps share keys out of its log; IPP logs them as it always has
+  const shown = opts.logKeys === false ? '(key withheld)' : key
   const url = buildUrl(apiUrl() + '/shared-links/me', {
     [keyType]: key
   })
@@ -58,7 +60,7 @@ export async function fetchSharedLink (key: string, keyType: KeyType = KeyType.k
         link.password = password
         if (link.expiresAt && dayjs(link.expiresAt) < dayjs()) {
           // This link has expired
-          log('Expired link ' + key)
+          log('Expired link ' + shown)
         } else {
           return {
             valid: true,
@@ -70,7 +72,7 @@ export async function fetchSharedLink (key: string, keyType: KeyType = KeyType.k
         // Check the message to distinguish between the two cases.
         if (jsonBody?.message === 'Invalid share key' || jsonBody?.message === 'Invalid share slug') {
           // Known invalid key/slug - treat as invalid request
-          log('Invalid share key ' + key)
+          log('Invalid share key ' + shown)
         } else {
           // Default: treat as password required (fail-safe)
           return {
@@ -84,7 +86,7 @@ export async function fetchSharedLink (key: string, keyType: KeyType = KeyType.k
     }
   } else {
     // Otherwise return failure
-    log('Immich response ' + res.status + ' for key ' + key)
+    log('Immich response ' + res.status + ' for key ' + shown)
     try {
       console.log(res.headers.get('Content-Type'))
       console.log((await res.text()).slice(0, 500))

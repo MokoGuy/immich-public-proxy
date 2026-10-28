@@ -366,6 +366,19 @@ Three reasons, in order of importance:
   with different rate limits, geoblocks or access rules in your reverse proxy. A single container would still let
   you split by path, but not to the same degree.
 
+### What does the upload service log
+
+One summary line a minute, and only in a minute that had uploads or still has one in progress:
+
+```
+2026-10-05T07:18:00+02:00 Guest upload | upload: created=12 duplicate=1 album-full=2 | check: answered=9 | slots 1/2 oldest <1m
+```
+
+Each count is a fixed label, such as `created`, `busy`, `not-media` or `transport`, so nothing a visitor sends can
+reach the log: no filename, visitor name, share key, address or date. The line is a warning when something is wrong
+with the service rather than with a visitor's file, for example uploads refused as `busy` or Immich unreachable. The
+`slots` part is reported even when nothing finishes, so uploads stuck in progress show up.
+
 ### Why does the rate limit count all visitors together
 
 Behind a reverse proxy every visitor reaches the upload service from the proxy's address, so

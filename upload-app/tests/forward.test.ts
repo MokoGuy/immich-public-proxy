@@ -12,8 +12,12 @@ describe('replyForImmichStatus', () => {
   })
 
   it('reads 401 and 403 as the share no longer accepting uploads', () => {
-    expect(replyForImmichStatus(401)).toEqual({ ok: false, status: 403, reason: NOT_ACCEPTING_UPLOADS })
-    expect(replyForImmichStatus(403)).toEqual({ ok: false, status: 403, reason: NOT_ACCEPTING_UPLOADS })
+    expect(replyForImmichStatus(401)).toEqual({ ok: false, status: 403, reason: NOT_ACCEPTING_UPLOADS, label: 'not-accepting' })
+    expect(replyForImmichStatus(403)).toEqual({ ok: false, status: 403, reason: NOT_ACCEPTING_UPLOADS, label: 'not-accepting' })
+  })
+
+  it('reads a success without an asset id as an invalid answer, not as stored', () => {
+    expect(replyForImmichStatus(201, {})).toMatchObject({ ok: false, status: 502, label: 'invalid-response' })
   })
 
   it('reports anything else as an upstream failure', () => {

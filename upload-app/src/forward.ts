@@ -1,9 +1,10 @@
 import { Readable } from 'stream'
 import crypto from 'crypto'
-import { apiUrl, authHeaders, buildUrl, log, streamingRequestInit } from '@ipp/core'
+import { apiUrl, authHeaders, buildUrl, streamingRequestInit } from '@ipp/core'
 import { UploadPermit, assertPermit } from './gate'
 import { matchesDeclaredType, SNIFF_BYTES } from './sniff'
 import { CaptureDate, captureDate, DateSource, noteParserFailure } from './capture-date'
+import { UploadLabel } from './upload-log'
 
 /**
  * Everything forwarded about one file, already validated by `receive.ts`.
@@ -23,7 +24,7 @@ export interface IncomingUpload {
 
 export type ForwardResult =
   | { ok: true, status: 'created' | 'duplicate', id: string, bytes: number, dateSource?: DateSource }
-  | { ok: false, status: number, reason: string }
+  | { ok: false, status: number, reason: string, label: UploadLabel }
 
 export const NOT_ACCEPTING_UPLOADS = 'This share does not accept uploads'
 export const NOT_MEDIA = 'The file\'s content does not match its type'
@@ -155,11 +156,12 @@ function multipartBody (boundary: string, upload: IncomingUpload, state: BodySta
  */
 export function replyForImmichStatus (status: number, body?: { id?: string, status?: string } | null): ForwardResult {
   if (status === 200 || status === 201) {
-    return { ok: true, status: body?.status === 'duplicate' ? 'duplicate' : 'created', id: body?.id || '', bytes: 0 }
+    if (!body?.id) return { ok: false, status: 502, reason: 'Immich rejected the upload', label: 'invalid-response' }
+    return { ok: true, status: body.status === 'duplicate' ? 'duplicate' : 'created', id: body.id, bytes: 0 }
   }
-  if (status === 400) return { ok: false, status: 400, reason: 'Immich would not accept this file' }
-  if (status === 401 || status === 403) return { ok: false, status: 403, reason: NOT_ACCEPTING_UPLOADS }
-  return { ok: false, status: 502, reason: 'Immich rejected the upload' }
+  if (status === 400) return { ok: false, status: 400, reason: 'Immich would not accept this file', label: 'upstream-rejected' }
+  if (status === 401 || status === 403) return { ok: false, status: 403, reason: NOT_ACCEPTING_UPLOADS, label: 'not-accepting' }
+  return { ok: false, status: 502, reason: 'Immich rejected the upload', label: 'upstream-rejected' }
 }
 
 /**
@@ -188,11 +190,12 @@ export async function forwardUpload (permit: UploadPermit, upload: IncomingUploa
     }, multipart))
   } catch (e) {
     // The generator's throw surfaces here as the fetch rejecting, wrapped
-    if (state.overflowed || causedBy(e, UploadTooLargeError)) return { ok: false, status: 413, reason: 'File is larger than declared' }
-    if (state.notMedia || causedBy(e, UploadNotMediaError)) return { ok: false, status: 415, reason: NOT_MEDIA }
-    if (signal.aborted) return { ok: false, status: 499, reason: 'Visitor cancelled the upload' }
-    log.warn('Upload to Immich failed for ' + upload.filename + ': ' + errorText(e))
-    return { ok: false, status: 502, reason: 'Could not reach Immich' }
+    if (state.overflowed || causedBy(e, UploadTooLargeError)) return TOO_LARGE
+    if (state.notMedia || causedBy(e, UploadNotMediaError)) return NOT_MEDIA_RESULT
+    if (signal.aborted) return { ok: false, status: 499, reason: 'Visitor cancelled the upload', label: abortLabel(signal) }
+    // Not logged here: fetch's error text can carry request values or a slice
+    // of Immich's answer. The summary counts it as `transport`.
+    return { ok: false, status: 502, reason: 'Could not reach Immich', label: 'transport' }
   } finally {
     // Immich may answer before the body is through; stop pulling from the visitor
     if (!multipart.readableEnded) multipart.destroy()
@@ -200,13 +203,20 @@ export async function forwardUpload (permit: UploadPermit, upload: IncomingUploa
 
   const body = await res.json().catch(() => null) as { id?: string, status?: string, message?: string } | null
   // An early answer to a body the generator gave up on: the flag is the truth
-  if (state.overflowed) return { ok: false, status: 413, reason: 'File is larger than declared' }
-  if (state.notMedia) return { ok: false, status: 415, reason: NOT_MEDIA }
+  if (state.overflowed) return TOO_LARGE
+  if (state.notMedia) return NOT_MEDIA_RESULT
   const result = replyForImmichStatus(res.status, body)
   if (result.ok) return { ...result, bytes: state.bytes, dateSource: state.dateSource }
-  log.warn('Immich refused upload ' + upload.filename + ' with status ' + res.status +
-    (body?.message ? ': ' + body.message : ''))
+  // Immich's message is not logged: it can carry the visitor's filename
   return result
+}
+
+const TOO_LARGE: ForwardResult = { ok: false, status: 413, reason: 'File is larger than declared', label: 'too-large' }
+const NOT_MEDIA_RESULT: ForwardResult = { ok: false, status: 415, reason: NOT_MEDIA, label: 'not-media' }
+
+/** Which bound ended a request, from the reason its signal was aborted with (see `admission.ts`). */
+function abortLabel (signal: AbortSignal): UploadLabel {
+  return signal.reason === 'idle-timeout' || signal.reason === 'deadline' ? signal.reason : 'client-gone'
 }
 
 /** Walk the `cause` chain: fetch wraps the body generator's error. */
@@ -217,8 +227,4 @@ function causedBy (e: unknown, type: new () => Error): boolean {
     current = (current as { cause?: unknown }).cause
   }
   return false
-}
-
-function errorText (e: unknown): string {
-  return e instanceof Error ? e.message : String(e)
 }

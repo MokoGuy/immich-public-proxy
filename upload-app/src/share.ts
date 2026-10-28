@@ -9,5 +9,5 @@ const shareCache = new TtlLruCache<Promise<SharedLinkResult>>({ ttlMs: 60_000, m
 
 /** Look up a share through `@ipp/core`, sharing one Immich call across concurrent requests. */
 export function getShare (key: string, keyType: KeyType, password?: string): Promise<SharedLinkResult> {
-  return cachedPromise(shareCache, `${keyType}:${key}:${password || ''}`, () => fetchSharedLink(key, keyType, password), result => result.valid)
+  return cachedPromise(shareCache, `${keyType}:${key}:${password || ''}`, () => fetchSharedLink(key, keyType, password, { logKeys: false }), result => result.valid)
 }

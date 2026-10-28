@@ -33,6 +33,7 @@ import { askName, galleryUrl, maxConcurrent, maxFileSize, slotIdleMs, slotMaxMs,
 import { uploadAllowed } from './gate'
 import { createUploadReceiver } from './receive'
 import { getShare } from './share'
+import { recordUpload, slotOpened, startUploadReporting } from './upload-log'
 import { ASSET_VERSION } from './version'
 import { UploadPage } from './view/upload'
 
@@ -117,7 +118,8 @@ type ShareResolution =
 async function resolveShare (req: Request): Promise<ShareResolution> {
   const keyType = getKeyTypeFromShare(req.params.shareType)
   if (slugLinksDisabled(keyType)) return { ok: false, reason: 'Slug links are disabled in config.json' }
-  if (!isKey(req.params.key)) return { ok: false, reason: 'Invalid key for ' + req.path }
+  // Neither the key nor the path is logged: an upload path carries the share key
+  if (!isKey(req.params.key)) return { ok: false, reason: 'Invalid key' }
   const share = await getShare(req.params.key, keyType, req.password)
   if (!share.valid) return { ok: false, reason: 'Invalid share link' }
   if (share.passwordRequired || !share.link) return { ok: false, reason: 'Password required', passwordRequired: true }
@@ -167,12 +169,15 @@ router.post('/share/unlock', bodyDeadline(10_000), express.json({ limit: '10kb' 
  */
 function admitted (handler: (req: Request, res: Response, signal: AbortSignal) => Promise<void>): RequestHandler {
   return asyncHandler(async (req, res) => {
-    const release = admission.tryAcquire()
-    if (!release) {
+    const releaseSlot = admission.tryAcquire()
+    if (!releaseSlot) {
+      recordUpload('busy')
       res.set('Retry-After', String(BUSY_RETRY_SECONDS))
       res.status(503).json({ error: 'The server is busy. The page will try again.', reason: 'busy' })
       return
     }
+    const releaseReport = slotOpened()
+    const release = () => { releaseSlot(); releaseReport() }
     const abort = new AbortController()
     const onClose = () => { if (!res.writableFinished) abort.abort('client-gone') }
     res.on('close', onClose)
@@ -196,6 +201,7 @@ function admitted (handler: (req: Request, res: Response, signal: AbortSignal) =
 router.post('/:shareType(share|s)/:key/upload', decodeCookie, admitted(async (req, res, signal) => {
   const resolved = await resolveShare(req)
   if (!resolved.ok) {
+    recordUpload('unresolved-share')
     respondToInvalidRequest(res, 404, resolved.reason)
     return
   }
@@ -216,7 +222,7 @@ app.use('/', router)
 */
 app.all('*', (req, res) => {
   addNoStoreHeaders(res)
-  respondToInvalidRequest(res, 404, 'Invalid route ' + req.path)
+  respondToInvalidRequest(res, 404, 'Invalid route')
 })
 
 app.use(errorHandler)
@@ -238,6 +244,8 @@ process.on('SIGTERM', () => {
 const port = Number(process.env.IPP_PORT) || 3000
 const server = app.listen(port, () => {
   console.log(dayjs().format() + ' Upload service started on port ' + port)
+  // One summary line a minute at most, silent while idle (see upload-log.ts)
+  startUploadReporting(admission.capacity)
   enforceMinimumImmichVersion().catch(() => {})
 })
 /*

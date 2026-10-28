@@ -1,7 +1,7 @@
 import { pipeline } from 'stream'
 import { Request, Response } from 'express-serve-static-core'
 import dayjs from 'dayjs'
-import { KeyType, log, respondToInvalidRequest, SharedLink, uploadRefusal, uploadRefusalMessage } from '@ipp/core'
+import { KeyType, respondToInvalidRequest, SharedLink, uploadRefusal, uploadRefusalMessage } from '@ipp/core'
 import { askName, byteBudget, fieldSeparator, filenamePrefix, maxFileSize, rateLimit } from './config'
 import { uploaderSlug, uploadFilename } from './filename'
 import { forwardUpload } from './forward'
@@ -10,6 +10,7 @@ import { createIdleTimeoutStream, IdleTimeoutError } from './idleTimeoutStream'
 import { createWindowBudget } from './limits'
 import { buildNotification, sendNotification } from './notify'
 import { formatSize, isUploadableName, isUploadableType } from './shared/upload'
+import { recordUpload, UploadLabel } from './upload-log'
 
 /*
   The visitor-facing half of the upload path: validate one request, then
@@ -35,7 +36,8 @@ const BODY_MIN_BYTES_PER_INTERVAL = 8 * 1024 * BODY_IDLE_MS / 1000
  * The connection closes after it (see `index.ts`), so a body still in flight
  * stops costing its full bandwidth.
  */
-function refuse (res: Response, status: number, reason: string): void {
+function refuse (res: Response, status: number, reason: string, label: UploadLabel): void {
+  recordUpload(label)
   res.status(status).json({ error: reason })
 }
 
@@ -88,6 +90,7 @@ export function createUploadReceiver () {
       // behind the 404 policy. Past that the visitor demonstrably holds a
       // working link, and "the album is full" tells them nothing they could
       // not see in the gallery.
+      recordUpload(refusal || 'not-allowed')
       if (!refusal || refusal === 'not-allowed' || refusal === 'slug-disabled') {
         respondToInvalidRequest(res, 404, 'Share does not accept uploads')
         return
@@ -99,15 +102,15 @@ export function createUploadReceiver () {
 
     const length = declaredLength(req.headers['content-length'])
     if (length === undefined) {
-      refuse(res, 411, 'The upload has no Content-Length')
+      refuse(res, 411, 'The upload has no Content-Length', 'no-length')
       return
     }
     if (length === 0) {
-      refuse(res, 400, 'The file is empty')
+      refuse(res, 400, 'The file is empty', 'empty')
       return
     }
     if (length > maxBytes) {
-      refuse(res, 413, 'Larger than the ' + formatSize(maxBytes) + ' limit')
+      refuse(res, 413, 'Larger than the ' + formatSize(maxBytes) + ' limit', 'too-large')
       return
     }
 
@@ -115,18 +118,18 @@ export function createUploadReceiver () {
     const uploader = withName ? uploaderSlug(req.query.uploader) : ''
     const filename = uploadFilename(req.query.filename, prefix, uploader, separator)
     if (!filename) {
-      refuse(res, 400, 'Missing or unusable filename')
+      refuse(res, 400, 'Missing or unusable filename', 'bad-filename')
       return
     }
 
     const mimeType = (req.headers['content-type'] || '').split(';')[0].trim().toLowerCase()
     if (!isUploadableType(mimeType) || !isUploadableName(filename)) {
-      refuse(res, 415, 'Only photos and videos can be sent')
+      refuse(res, 415, 'Only photos and videos can be sent', 'not-media')
       return
     }
 
     if (isFutureTimestamp(req.query.fileCreatedAt) || isFutureTimestamp(req.query.fileModifiedAt)) {
-      refuse(res, 400, 'The file\'s date is in the future. Check the device\'s clock.')
+      refuse(res, 400, 'The file\'s date is in the future. Check the device\'s clock.', 'bad-date')
       return
     }
 
@@ -135,7 +138,7 @@ export function createUploadReceiver () {
     const rated = rate(req.ip + ':' + shareId)
     if (!rated.ok) {
       res.set('Retry-After', String(rated.retryAfterSeconds))
-      refuse(res, 429, 'Too many uploads. Wait a moment and try again.')
+      refuse(res, 429, 'Too many uploads. Wait a moment and try again.', 'rate-limited')
       return
     }
 
@@ -143,13 +146,13 @@ export function createUploadReceiver () {
     const reserved = budget(shareId, length)
     if (!reserved.ok) {
       res.set('Retry-After', String(reserved.retryAfterSeconds))
-      refuse(res, 413, 'This share has received its limit for the hour. Try again later.')
+      refuse(res, 413, 'This share has received its limit for the hour. Try again later.', 'budget-exceeded')
       return
     }
 
-    const body = pipeline(req, createIdleTimeoutStream(BODY_IDLE_MS, BODY_MIN_BYTES_PER_INTERVAL), err => {
-      if (err instanceof IdleTimeoutError) log('Dropped upload ' + filename + ': too little received in ' + BODY_IDLE_MS / 1000 + ' s')
-    })
+    // A stall is read from the stream once the upload is over; the callback
+    // only keeps the pipeline from reporting an unhandled error
+    const body = pipeline(req, createIdleTimeoutStream(BODY_IDLE_MS, BODY_MIN_BYTES_PER_INTERVAL), () => {})
     const result = await forwardUpload(permit, {
       filename,
       mimeType,
@@ -161,13 +164,19 @@ export function createUploadReceiver () {
 
     if (!result.ok) {
       reserved.release()
-      // The visitor hung up; there is nobody left to answer
-      if (result.status === 499) return
-      refuse(res, result.status, result.reason)
+      const stalled = body.errored instanceof IdleTimeoutError
+      // The visitor hung up, or a bound ended the request; there is nobody left to answer
+      if (result.status === 499) {
+        recordUpload(result.label)
+        return
+      }
+      refuse(res, stalled ? 502 : result.status, stalled ? 'The upload stalled. Try again.' : result.reason, stalled ? 'body-stalled' : result.label)
       return
     }
 
-    log('Received upload ' + filename + ' for share ' + (link.slug || link.id) + ' (Immich result: ' + result.status + ')')
+    // Counted, never logged one by one: no filename, name or share reaches the log
+    recordUpload(result.status)
+    if (result.dateSource === 'client') recordUpload('no-capture-date')
     // `client`: the file carried no date of its own, so the album shows it as
     // taken when it was sent; the page tells the visitor while they are there
     res.json({ status: result.status, dateSource: result.dateSource })

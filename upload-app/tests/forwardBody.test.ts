@@ -74,7 +74,7 @@ describe('forwardUpload', () => {
   it('refuses a file whose bytes contradict its type, before any of it reaches Immich', async () => {
     const seen = stubImmich()
     const result = await forwardUpload(permit(), upload(ZIP, 'image/png'), new AbortController().signal)
-    expect(result).toEqual({ ok: false, status: 415, reason: NOT_MEDIA })
+    expect(result).toEqual({ ok: false, status: 415, reason: NOT_MEDIA, label: 'not-media' })
     expect(seen.body).toBeUndefined()
   })
 
