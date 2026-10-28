@@ -31,6 +31,8 @@
     "dist",
     "tests",
     "vitest.config.ts",
+    "vitest.e2e.config.ts",
+    "playwright.config.ts",
     "src/client"
   ],
   "references": [

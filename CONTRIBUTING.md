@@ -167,6 +167,19 @@ npm run test:container  # build a podman image and run it locally
 
 Beyond unit tests, exercise the gallery end-to-end against a real Immich instance: happy path plus failure paths (expired share, trashed asset, password protection, very large albums, video range requests).
 
+Visitor uploads have two suites that run against a throwaway Immich, the IPP and upload service images built from the
+working tree, and a Traefik in front (`test/immich-stack.yml`, ports 2283 and 3380-3384 on 127.0.0.1). CI runs both
+(`.github/workflows/ci.yml`):
+
+```bash
+docker compose -f test/immich-stack.yml up -d --build --wait
+eval "$(./test/bootstrap.sh)"                      # admin, login, a scoped fixture key; prints the env
+npm run test:e2e --workspace=upload-app            # request level, against the upload service directly
+npx --prefix upload-app playwright install chromium
+npm run test:browser --workspace=upload-app        # gallery and upload page in Chromium, through the proxy
+docker compose -f test/immich-stack.yml down -v
+```
+
 ## Conventions for adding code
 
 **Configuration.** New options go in `app/config.json` under the appropriate `ipp.*` namespace, read via `getConfigOption`, and documented on the page for their group under `docs/config/` (see `docs/README.md` for the conventions). `npm test` and the docs build fail until the page matches. Prefer a group toggle plus per-field overrides over a single flat boolean when several related toggles cluster, following the `ipp.showMetadata` pattern. Rename a key only in a major version: the old name simply stops being read (no compatibility shim), and the rename gets a row in Renamed config keys (`docs/config/upgrading.md`) plus a line in that release's upgrade notes.

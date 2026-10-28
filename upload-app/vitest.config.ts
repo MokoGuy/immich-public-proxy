@@ -8,6 +8,8 @@ export default defineConfig({
   },
   test: {
     include: ['tests/**/*.test.ts'],
+    // Need a live Immich: `npm run test:e2e` and `npm run test:browser`
+    exclude: ['tests/e2e/**', 'tests/browser/**', '**/node_modules/**'],
     environment: 'node'
   }
 })

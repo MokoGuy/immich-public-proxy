@@ -1,0 +1,145 @@
+name: CI
+
+# Secret-free by design. The integration job stands up its own Immich, mints
+# its own scoped API key and throws all of it away - nothing here needs a
+# credential from repository settings, so it runs unchanged on a fork or a
+# pull request from one.
+on:
+  push:
+    branches: ['**']
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  unit:
+    name: Unit tests, lint and types
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+          cache: npm
+      - run: npm ci
+      # tsc -b over every workspace, servers and clients
+      - run: npm run build
+      - run: npm run lint
+      # Every workspace plus the docs' config-page check. tests/e2e and
+      # tests/browser are excluded by config: this job has no Immich.
+      - run: npm test
+
+  integration:
+    name: Against a real Immich
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Start Immich, IPP, the upload services and the front proxy
+        run: docker compose -f test/immich-stack.yml up -d --build --wait
+
+      # Three public API calls against an empty instance. The key it mints is
+      # scoped to fixtures and cannot upload - visitor upload is authorised by
+      # the share key alone, which is the thing under test.
+      - name: Bootstrap Immich
+        run: ./test/bootstrap.sh >> "$GITHUB_ENV"
+
+      - name: Request-level suite
+        run: npm run test:e2e --workspace=upload-app
+
+      - name: Install browser
+        working-directory: upload-app
+        run: npx playwright install --with-deps chromium
+
+      - name: Browser suite
+        run: npm run test:browser --workspace=upload-app
+
+      - name: Service logs on failure
+        if: failure()
+        run: docker compose -f test/immich-stack.yml logs --tail=200
+
+      - name: Playwright artefacts on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: upload-app/test-results/
+          retention-days: 7
+
+      - name: Tear down
+        if: always()
+        run: docker compose -f test/immich-stack.yml down -v
+
+  image:
+    name: Container images
+    runs-on: ubuntu-latest
+    needs: [unit, integration]
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      matrix:
+        include:
+          - dockerfile: Dockerfile
+            image: ghcr.io/${{ github.repository_owner }}/immich-public-proxy
+          - dockerfile: Dockerfile.upload
+            image: ghcr.io/${{ github.repository_owner }}/immich-public-proxy-upload
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+
+      # Only authenticate when actually pushing. Builds on a pull request stay
+      # local, so a fork PR never needs package write.
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Version
+        id: version
+        # A tag is an exact, stable ref; a branch build carries the upstream
+        # version it is based on and the commit, so the footer and the static
+        # asset paths name what is actually running.
+        run: |
+          if [ "${{ github.ref_type }}" = tag ]; then
+            echo "value=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+          else
+            echo "value=$(jq -r .version app/package.json)-hardening.${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Tags
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ matrix.image }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=semver,pattern={{version}}
+            type=sha,format=short
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            PACKAGE_VERSION=${{ steps.version.outputs.value }}
+          cache-from: type=gha,scope=${{ matrix.dockerfile }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.dockerfile }}

@@ -1,10 +1,15 @@
-name: Create and publish a Docker image
+name: Create and publish a Docker image (upstream, disabled in this fork)
 
+# Neutralised on purpose. This is upstream's release workflow; it pushes to
+# Docker Hub under `${{ github.repository }}` as well as GHCR, which cannot
+# work on a fork without Docker Hub credentials, and it would race the `image`
+# job in ci.yml on the same tag.
+#
+# Image publishing for this fork lives in ci.yml, gated on the test jobs.
+# The file is kept rather than deleted so syncing upstream stays cheap; only
+# the trigger is changed.
 on:
   workflow_dispatch:
-  push:
-    tags:
-      - 'v*'
 
 jobs:
   build-and-push-image:

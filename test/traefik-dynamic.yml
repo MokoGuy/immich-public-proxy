@@ -1,0 +1,21 @@
+# The production route shape for the test stack's front proxy.
+http:
+  routers:
+    ipp:
+      entryPoints: [web]
+      rule: PathPrefix(`/`)
+      service: ipp
+    ipp-upload:
+      entryPoints: [web]
+      rule: PathPrefix(`/upload`)
+      priority: 100
+      service: ipp-upload
+  services:
+    ipp:
+      loadBalancer:
+        servers:
+          - url: http://ipp:3000
+    ipp-upload:
+      loadBalancer:
+        servers:
+          - url: http://upload:3000

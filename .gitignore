@@ -8,3 +8,5 @@ app/public/js/
 .npm-cache/
 *.tsbuildinfo
 upload-app/public/js/
+test-results/
+playwright-report/
