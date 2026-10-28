@@ -189,7 +189,7 @@ How long to wait for the notification URL to answer, in milliseconds.
 
 **Type:** `int` · **Default:** `2`
 
-Uploads the service handles at once, from all visitors together. One more
+Uploads and duplicate checks the service handles at once, from all visitors together. One more
 is answered `503` with `Retry-After: 5` before any of its body is read, and the page waits and sends it again; the
 wait does not count against its three tries. Requests are refused rather than queued, so visitors holding a link
 cannot pile up connections until the service falls over. The smallest value is `1`.

@@ -340,6 +340,11 @@ includes a short notice to let visitors know about the delay; you can change the
 
 Immich keeps the one copy and adds it to the share. The visitor's list shows the file as a duplicate.
 
+Before sending a file of up to 200 MB, the upload page computes its checksum and asks the upload service whether the
+share already shows it. If it does, the file is marked as a duplicate without being sent. The answer covers only the
+share's own photos, never the rest of the owner's library, so it tells a visitor nothing they could not see in the
+gallery. Over plain HTTP the browser cannot compute the checksum, and every file is sent.
+
 ### What if a visitor sends a malicious file
 
 The upload container never opens the file. It only accepts image and video types, and streams the bytes to Immich.

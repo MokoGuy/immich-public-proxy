@@ -26,14 +26,17 @@ import {
   SharedLink,
   slugLinksDisabled,
   title,
-  unlockHandler
+  unlockHandler,
+  uploadRefusal,
+  uploadRefusalMessage
 } from '@ipp/core'
 import { boundSlot, createAdmission } from './admission'
 import { askName, galleryUrl, maxConcurrent, maxFileSize, slotIdleMs, slotMaxMs, uploadNotice } from './config'
-import { uploadAllowed } from './gate'
+import { authoriseUpload, uploadAllowed } from './gate'
 import { createUploadReceiver } from './receive'
 import { getShare } from './share'
-import { recordUpload, slotOpened, startUploadReporting } from './upload-log'
+import { checkDuplicate, isSha1Base64 } from './duplicate'
+import { recordCheck, recordUpload, slotOpened, startUploadReporting } from './upload-log'
 import { ASSET_VERSION } from './version'
 import { UploadPage } from './view/upload'
 
@@ -145,6 +148,7 @@ router.get('/:shareType(share|s)/:key', decodeCookie, asyncHandler(async (req, r
   res.send(renderPage(h(UploadPage, {
     config: {
       uploadUrl: `${req.baseUrl}/${req.params.shareType}/${encodeURIComponent(key)}/upload`,
+      checkUrl: `${req.baseUrl}/${req.params.shareType}/${encodeURIComponent(key)}/check`,
       maxFileSize: maxFileSize(),
       title: title(resolved.link),
       askName: askName()
@@ -206,6 +210,50 @@ router.post('/:shareType(share|s)/:key/upload', decodeCookie, admitted(async (re
     return
   }
   await receiveUpload(req, res, resolved.link, resolved.keyType, signal)
+}))
+
+/*
+  [ROUTE] Whether the share already shows a file, by its SHA-1 in
+  `X-IPP-Checksum`, so the page can skip sending it (see `duplicate.ts`).
+  Behind the same gate and the same admission as an upload, so it cannot
+  become a way to probe a library through a link that may not write to it.
+  The answer is a yes or no about this share only; the asset id never leaves.
+*/
+router.post('/:shareType(share|s)/:key/check', decodeCookie, admitted(async (req, res, signal) => {
+  const resolved = await resolveShare(req)
+  if (!resolved.ok) {
+    recordCheck('unresolved-share')
+    respondToInvalidRequest(res, 404, resolved.reason)
+    return
+  }
+  const permit = authoriseUpload(resolved.link, req.params.key, resolved.keyType, req.password)
+  if (!permit) {
+    const refusal = uploadRefusal(resolved.link, resolved.keyType) || 'not-allowed'
+    recordCheck(refusal)
+    if (refusal === 'not-allowed' || refusal === 'slug-disabled') {
+      respondToInvalidRequest(res, 404, 'Share does not accept uploads')
+      return
+    }
+    res.status(403).json({ error: uploadRefusalMessage(refusal), reason: refusal })
+    return
+  }
+  const checksum = req.headers['x-ipp-checksum']
+  if (!isSha1Base64(checksum)) {
+    recordCheck('bad-checksum')
+    res.status(400).json({ error: 'Not a SHA-1 checksum', reason: 'bad-checksum' })
+    return
+  }
+  const result = await checkDuplicate({ key: permit.key, keyType: permit.keyType, password: permit.password, checksum, signal })
+  if (!result.available) {
+    recordCheck('unavailable')
+    // Honest about not knowing: the page sends the file either way, but a
+    // check that has stopped working is told apart from one that finds nothing
+    res.json({ duplicate: false, checked: false })
+    return
+  }
+  // One counter, not hit and miss: whether the owner holds a file is not the log's business
+  recordCheck('answered')
+  res.json({ duplicate: result.duplicate, checked: true })
 }))
 
 /*

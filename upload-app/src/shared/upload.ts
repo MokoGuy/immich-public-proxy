@@ -82,6 +82,8 @@ export function formatSize (bytes: number): string {
 export interface UploadPageConfig {
   /** Path of this share's upload endpoint, including any mount prefix. */
   uploadUrl: string
+  /** Path of this share's duplicate check, see `POST <share>/check`. */
+  checkUrl: string
   /** Largest single file the server accepts, in bytes. */
   maxFileSize: number
   /** Share title, for the drop overlay and the completion message. */
@@ -115,3 +117,9 @@ export interface UploadErrorResponse {
 export const LINK_REFUSAL_REASONS: readonly string[] = [
   'not-album', 'slug', 'no-password', 'no-expiry', 'expired', 'expiry-too-far', 'album-full'
 ]
+
+/** Body of `POST <share>/check`. `checked: false` means Immich could not be asked. */
+export interface CheckResponse {
+  duplicate: boolean
+  checked: boolean
+}

@@ -8,8 +8,9 @@
 
 import { createLimiter } from '../shared/limiter.js'
 import { acquireWakeLock, releaseWakeLock } from './wake-lock.js'
+import { shouldPreCheck } from '../shared/precheck.js'
 import { fileType, formatSize, isUploadableName, isUploadableType, LINK_REFUSAL_REASONS } from '../shared/upload.js'
-import type { UploadErrorResponse, UploadPageConfig, UploadResponse } from '../shared/upload.js'
+import type { CheckResponse, UploadErrorResponse, UploadPageConfig, UploadResponse } from '../shared/upload.js'
 import {
   ICON_ALERT_CIRCLE,
   ICON_CHECK_CIRCLE,
@@ -54,6 +55,8 @@ interface UploadRow {
   icon: HTMLElement
   action: HTMLButtonElement
   xhr?: XMLHttpRequest
+  // Ends a duplicate check in flight
+  checkAbort?: AbortController
   // Ends a retry wait early
   wake?: () => void
   cancelled: boolean
@@ -186,6 +189,7 @@ function addRow (file: File, type: string): UploadRow {
     // Cancel and dismiss both take the row away; a cancelled file is not counted
     if (action.dataset.kind === 'cancel') {
       row.cancelled = true
+      row.checkAbort?.abort()
       row.xhr?.abort()
       row.wake?.()
     }
@@ -290,6 +294,51 @@ function attempt (row: UploadRow, attemptNumber: number): Promise<Attempt> {
   })
 }
 
+/*
+  The duplicate check needs WebCrypto, which browsers expose only in a secure
+  context; over plain HTTP the page sends every file without asking.
+*/
+const canCheck = typeof crypto !== 'undefined' && typeof crypto.subtle?.digest === 'function' && typeof btoa === 'function'
+
+/**
+ * SHA-1 of a file, base64, as Immich stores it. `crypto.subtle` has no
+ * incremental form, so this holds the whole file in memory: `shouldPreCheck`
+ * keeps it to files where that is safe.
+ */
+async function sha1 (file: File): Promise<string> {
+  const digest = await crypto.subtle.digest('SHA-1', await file.arrayBuffer())
+  let binary = ''
+  for (const byte of new Uint8Array(digest)) binary += String.fromCharCode(byte)
+  return btoa(binary)
+}
+
+/**
+ * Whether the share already shows this file, so it need not be sent. Worth
+ * most on exactly the files that cost most to hash: skipping a five-minute
+ * video upload pays for a second of hashing many times over. Any failure is
+ * a "no": a check that does not work must never stop a file being sent.
+ */
+async function alreadyShared (row: UploadRow): Promise<boolean> {
+  if (!config.checkUrl || !shouldPreCheck(row.file.size, canCheck)) return false
+  showProgress(row, 'Checking', 0)
+  row.checkAbort = new AbortController()
+  try {
+    const checksum = await sha1(row.file)
+    if (row.cancelled) return false
+    const res = await fetch(config.checkUrl, {
+      method: 'POST',
+      headers: { 'X-IPP-Checksum': checksum },
+      signal: row.checkAbort.signal
+    })
+    if (!res.ok) return false
+    return ((await res.json()) as Partial<CheckResponse>).duplicate === true
+  } catch {
+    return false
+  } finally {
+    row.checkAbort = undefined
+  }
+}
+
 /** Wait before a retry; cancelling the row ends the wait. */
 function waitToRetry (row: UploadRow, ms: number): Promise<void> {
   return new Promise(resolve => {
@@ -303,6 +352,11 @@ function waitToRetry (row: UploadRow, ms: number): Promise<void> {
 
 /** Send one file, retrying a rate limit or a network error, and record the result on its row. */
 async function sendFile (row: UploadRow) {
+  setState(row, 'started')
+  if (await alreadyShared(row)) {
+    if (!row.cancelled) finish(row, 'duplicate')
+    return
+  }
   for (let attemptNumber = 1; !row.cancelled; attemptNumber++) {
     if (linkRefusal) {
       finish(row, 'error', linkRefusal)
