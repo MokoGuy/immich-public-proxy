@@ -98,4 +98,14 @@ export interface UploadResponse {
 /** Failure body of `POST <share>/upload`. */
 export interface UploadErrorResponse {
   error: string
+  /** A machine-readable code, for refusals the page acts on. */
+  reason?: string
 }
+
+/**
+ * Refusal codes about the link rather than the file (`uploadRefusal` in
+ * core): once one comes back, every file still queued would get the same.
+ */
+export const LINK_REFUSAL_REASONS: readonly string[] = [
+  'not-album', 'slug', 'no-password', 'no-expiry', 'expired', 'expiry-too-far', 'album-full'
+]

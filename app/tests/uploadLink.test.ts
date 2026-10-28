@@ -12,7 +12,8 @@ const share = (overrides: Partial<SharedLink> = {}): SharedLink => ({
   keyType: KeyType.key,
   type: 'ALBUM',
   assets: [],
-  expiresAt: null,
+  // The default upload policy wants an expiry within 30 days
+  expiresAt: new Date(Date.now() + 7 * 86_400_000).toISOString(),
   allowUpload: true,
   ...overrides
 })
@@ -51,8 +52,19 @@ describe('uploadLink', () => {
   })
 
   it('links a share opened by its slug by that slug', () => {
-    setConfig({ ipp: { uploadUrl: 'https://photos.example.com/upload' } })
+    setConfig({ ipp: { uploadUrl: 'https://photos.example.com/upload', upload: { requireRandomKey: false } } })
     expect(uploadLink(share({ keyType: KeyType.slug, slug: 'holiday 2025' }))).toBe('https://photos.example.com/upload/s/holiday%202025')
+  })
+
+  it('is absent on a slug gallery while the upload policy requires the random key', () => {
+    setConfig({ ipp: { uploadUrl: 'https://photos.example.com/upload' } })
+    expect(uploadLink(share({ keyType: KeyType.slug, slug: 'holiday' }))).toBeUndefined()
+  })
+
+  it('is absent when the upload service would refuse the link', () => {
+    expect(uploadLink(share({ expiresAt: null }))).toBeUndefined()
+    expect(uploadLink(share({ type: 'INDIVIDUAL' }))).toBeUndefined()
+    expect(uploadLink(share({ album: { id: 'a', assetCount: 500 } }))).toBeUndefined()
   })
 
   it('is absent when the owner has not allowed uploads', () => {

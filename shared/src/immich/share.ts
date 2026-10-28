@@ -51,6 +51,9 @@ export async function fetchSharedLink (key: string, keyType: KeyType = KeyType.k
     if (jsonBody) {
       if (res.status === 200) {
         const link = jsonBody as SharedLink
+        // Immich's `password` is replaced by the visitor's just below, so keep
+        // whether the link has one at all for the upload policy
+        link.passwordProtected = !!jsonBody.password
         link.keyType = keyType
         link.password = password
         if (link.expiresAt && dayjs(link.expiresAt) < dayjs()) {

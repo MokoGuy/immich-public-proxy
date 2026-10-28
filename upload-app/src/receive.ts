@@ -1,7 +1,7 @@
 import { pipeline } from 'stream'
 import { Request, Response } from 'express-serve-static-core'
 import dayjs from 'dayjs'
-import { abortOnClose, KeyType, log, respondToInvalidRequest, SharedLink } from '@ipp/core'
+import { abortOnClose, KeyType, log, respondToInvalidRequest, SharedLink, uploadRefusal, uploadRefusalMessage } from '@ipp/core'
 import { askName, byteBudget, fieldSeparator, filenamePrefix, maxFileSize, rateLimit } from './config'
 import { uploaderSlug, uploadFilename } from './filename'
 import { forwardUpload } from './forward'
@@ -73,7 +73,16 @@ export function createUploadReceiver () {
     const key = req.params.key
     const permit = authoriseUpload(link, key, keyType, req.password)
     if (!permit) {
-      respondToInvalidRequest(res, 404, 'Share does not accept uploads')
+      const refusal = uploadRefusal(link, keyType)
+      // A share whose owner said no, or a slug that is not a credential, stays
+      // behind the 404 policy. Past that the visitor demonstrably holds a
+      // working link, and "the album is full" tells them nothing they could
+      // not see in the gallery.
+      if (!refusal || refusal === 'not-allowed' || refusal === 'slug-disabled') {
+        respondToInvalidRequest(res, 404, 'Share does not accept uploads')
+        return
+      }
+      res.status(403).json({ error: uploadRefusalMessage(refusal), reason: refusal })
       return
     }
     const shareId = link.id || key

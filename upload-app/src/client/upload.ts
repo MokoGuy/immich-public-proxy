@@ -7,7 +7,7 @@
 // to the request body.
 
 import { createLimiter } from '../shared/limiter.js'
-import { fileType, formatSize, isUploadableName, isUploadableType } from '../shared/upload.js'
+import { fileType, formatSize, isUploadableName, isUploadableType, LINK_REFUSAL_REASONS } from '../shared/upload.js'
 import type { UploadErrorResponse, UploadPageConfig, UploadResponse } from '../shared/upload.js'
 import {
   ICON_ALERT_CIRCLE,
@@ -187,7 +187,7 @@ function addRow (file: File, type: string): UploadRow {
 
 type Attempt =
   | { outcome: 'sent', duplicate: boolean }
-  | { outcome: 'failed', message: string, retryable: boolean }
+  | { outcome: 'failed', message: string, retryable: boolean, linkRefused?: boolean }
   | { outcome: 'retry', waitMs: number }
   | { outcome: 'cancelled' }
 
@@ -210,7 +210,25 @@ function failureMessage (xhr: XMLHttpRequest): string {
  */
 function failure (xhr: XMLHttpRequest): Attempt {
   const retryable = xhr.status >= 500 || xhr.getResponseHeader('Retry-After') !== null
-  return { outcome: 'failed', message: failureMessage(xhr), retryable }
+  let reason: string | undefined
+  try { reason = (JSON.parse(xhr.responseText) as Partial<UploadErrorResponse>).reason } catch { }
+  const linkRefused = xhr.status === 403 && !!reason && LINK_REFUSAL_REASONS.includes(reason)
+  return { outcome: 'failed', message: failureMessage(xhr), retryable, linkRefused }
+}
+
+/*
+  Set once the link itself stops accepting uploads (the album filled up, the
+  link expired): every file still waiting would get the same answer, so they
+  fail with it at once rather than each spending a request to learn it.
+*/
+let linkRefusal: string | undefined
+
+// Rows waiting out a retry, woken when the link is refused
+const waiting = new Set<UploadRow>()
+
+function refuseLink (message: string) {
+  linkRefusal = message
+  for (const row of waiting) row.wake?.()
 }
 
 /** One request for one file. XHR rather than fetch, because only XHR reports upload progress. */
@@ -269,6 +287,10 @@ function waitToRetry (row: UploadRow, ms: number): Promise<void> {
 /** Send one file, retrying a rate limit or a network error, and record the result on its row. */
 async function sendFile (row: UploadRow) {
   for (let attemptNumber = 1; !row.cancelled; attemptNumber++) {
+    if (linkRefusal) {
+      finish(row, 'error', linkRefusal)
+      return
+    }
     setState(row, 'started')
     showProgress(row, '0%', 0)
     const result = await attempt(row, attemptNumber)
@@ -279,6 +301,7 @@ async function sendFile (row: UploadRow) {
     }
     if (result.outcome === 'failed') {
       finish(row, 'error', result.message, result.retryable)
+      if (result.linkRefused) refuseLink(result.message)
       return
     }
     if (attemptNumber >= ATTEMPTS || result.waitMs > MAX_RETRY_WAIT_MS) {
@@ -287,7 +310,9 @@ async function sendFile (row: UploadRow) {
     }
     setState(row, 'pending')
     showProgress(row, 'Waiting to retry', 0)
+    waiting.add(row)
     await waitToRetry(row, result.waitMs)
+    waiting.delete(row)
   }
 }
 

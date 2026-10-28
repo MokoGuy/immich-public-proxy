@@ -96,7 +96,10 @@ export interface SharedLink {
   // The owner's "Allow public user to upload" toggle
   allowUpload?: boolean;
   showMetadata?: boolean;
+  // The password the visitor supplied, set by IPP, not by Immich
   password?: string;
+  // Whether Immich protects the link with a password, from its own answer
+  passwordProtected?: boolean;
   album?: {
     id: string;
     albumName?: string;

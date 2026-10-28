@@ -18,9 +18,15 @@ export function share (overrides: Partial<SharedLink> = {}): SharedLink {
     keyType: KeyType.key,
     type: AlbumType.album,
     assets: [],
-    expiresAt: null,
+    // The default upload policy wants an expiry within 30 days
+    expiresAt: inDays(7),
     allowUpload: true,
     album: { id: 'aaaaaaaa-0000-0000-0000-000000000002', albumName: 'Holiday 2025' },
     ...overrides
   }
+}
+
+/** An ISO timestamp `days` from now. */
+export function inDays (days: number): string {
+  return new Date(Date.now() + days * 86_400_000).toISOString()
 }

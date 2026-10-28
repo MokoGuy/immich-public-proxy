@@ -12,7 +12,13 @@
       "fieldSeparator": ",",
       "notifyUrl": "",
       "notifyHeaders": {},
-      "notifyTimeout": 10000
+      "notifyTimeout": 10000,
+      "albumOnly": true,
+      "requireRandomKey": true,
+      "requireExpiry": true,
+      "maxExpiryDays": 30,
+      "requirePassword": false,
+      "maxAssets": 500
     }
   }
 }

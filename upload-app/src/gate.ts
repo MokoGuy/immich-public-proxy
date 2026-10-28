@@ -7,12 +7,14 @@
     2. `assertPermit()` - immediately before the request to Immich is built.
 
   The gate is the owner's "Allow public user to upload" toggle on the share,
-  read from a share lookup at most 60 s old. Immich enforces the same toggle
-  on every upload, so a mistake here still cannot upload to a share whose
-  owner said no.
+  read from a share lookup at most 60 s old, plus the operator's per-link
+  policy in `@ipp/core` (`uploadRefusal`: random key, expiry horizon, album
+  only, asset cap, optional password). IPP applies the same policy to decide
+  whether to show the button. Immich enforces the toggle on every upload, so
+  a mistake here still cannot upload to a share whose owner said no.
 */
 
-import { KeyType, SharedLink, slugLinksDisabled } from '@ipp/core'
+import { KeyType, SharedLink, uploadRefusal } from '@ipp/core'
 
 /*
   A real symbol rather than a type-only brand, so `assertPermit` has
@@ -37,7 +39,7 @@ export interface UploadPermit {
 
 /** Whether this share accepts uploads through this key type right now. */
 export function uploadAllowed (link: SharedLink, keyType: KeyType): boolean {
-  return link.allowUpload === true && !slugLinksDisabled(keyType)
+  return uploadRefusal(link, keyType) === null
 }
 
 /** Issue a permit, or null when this share does not accept uploads. */

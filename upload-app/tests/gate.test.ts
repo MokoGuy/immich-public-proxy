@@ -19,6 +19,27 @@ describe('authoriseUpload', () => {
   })
 })
 
+describe('the per-link upload policy', () => {
+  it('refuses a link the operator policy rejects, even with the owner\'s toggle on', () => {
+    expect(authoriseUpload(share({ expiresAt: null }), 'k', KeyType.key)).toBeNull()
+    expect(authoriseUpload(share({ album: { id: 'a', assetCount: 500 } }), 'k', KeyType.key)).toBeNull()
+    expect(authoriseUpload(share({ type: 'INDIVIDUAL' }), 'k', KeyType.key)).toBeNull()
+    expect(authoriseUpload(share(), 'my-slug', KeyType.slug)).toBeNull()
+  })
+
+  it('follows the operator when a requirement is turned off', () => {
+    setConfig({ ipp: { upload: { requireRandomKey: false } } })
+    expect(authoriseUpload(share(), 'my-slug', KeyType.slug)).not.toBeNull()
+  })
+
+  it('re-checks the policy at the point of use', () => {
+    const link = share()
+    const permit = authoriseUpload(link, 'k', KeyType.key)!
+    link.album = { id: 'a', assetCount: 10_000 }
+    expect(() => assertPermit(permit)).toThrow('does not allow uploads')
+  })
+})
+
 describe('assertPermit', () => {
   it('passes a permit from authoriseUpload', () => {
     expect(() => assertPermit(authoriseUpload(share(), 'k', KeyType.key)!)).not.toThrow()

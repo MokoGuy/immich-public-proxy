@@ -1,4 +1,4 @@
-import { Asset, AssetVisibility, getConfigOption, KeyType, log, SharedLink, TtlLruCache } from '@ipp/core'
+import { Asset, AssetVisibility, getConfigOption, KeyType, log, SharedLink, TtlLruCache, uploadRefusal } from '@ipp/core'
 import { DownloadAll } from './types'
 import dayjs from 'dayjs'
 
@@ -56,13 +56,16 @@ export function uploadHealthcheck (): string | undefined {
 
 /**
  * The "Add photos" link to this share on the upload service, or undefined
- * when there is no usable `ipp.uploadUrl` (see `uploadBase`) or the owner has
- * not turned on "Allow public user to upload". A share opened by its slug
- * links by its slug, so the upload service resolves it the same way.
+ * when there is no usable `ipp.uploadUrl` (see `uploadBase`) or the upload
+ * service would refuse the share: the owner has not turned on "Allow public
+ * user to upload", or the link fails the operator's `ipp.upload.*` policy
+ * (`uploadRefusal` in core, the same check the upload service makes). A share
+ * opened by its slug links by its slug, so the upload service resolves it
+ * the same way.
  */
 export function uploadLink (share: SharedLink): string | undefined {
   const base = uploadBase()
-  if (!share.allowUpload || !base) return undefined
+  if (!base || uploadRefusal(share, share.keyType) !== null) return undefined
   return share.keyType === KeyType.slug && share.slug
     ? base + '/s/' + encodeURIComponent(share.slug)
     : base + '/share/' + encodeURIComponent(share.key)

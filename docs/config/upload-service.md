@@ -8,9 +8,10 @@ Settings for the optional upload service, the `immich-public-proxy-upload` conta
 and videos back to a share. The setup is in [Let visitors send photos back](/visitor-uploads).
 
 The service reads config the same way as IPP: a `config.json` mounted at `/app/config.json`, the file named by
-`IPP_CONFIG`, or the `CONFIG` environment variable. Its own options are under `ipp.upload.*`. IPP never reads those,
-and the service reads none of IPP's options except the two under [Shared options](#shared-options), so one
-`config.json` can be mounted into both containers. The [environment variables](/config/environment-variables) mean
+`IPP_CONFIG`, or the `CONFIG` environment variable. Its own options are under `ipp.upload.*`. IPP reads only the
+upload policy among those, from [`albumOnly`](#albumonly) to [`maxAssets`](#maxassets), and the service reads none of
+IPP's options except the two under [Shared options](#shared-options), so one `config.json` can be mounted into both
+containers. The [environment variables](/config/environment-variables) mean
 the same as for IPP, and `PUBLIC_BASE_URL` is IPP's public URL, not the service's own.
 
 ## Example
@@ -184,6 +185,51 @@ Extra headers sent with each notification, for example an `Authorization` header
 
 How long to wait for the notification URL to answer, in milliseconds.
 
+## `albumOnly`
+
+**Type:** `bool` · **Default:** `true`
+
+Accept uploads only through a share of an album. A share of selected photos is refused, and IPP shows it no
+**Add photos** button. With `false`, uploads to such a share go into the shared link itself.
+
+This option and the five after it are the per-link upload policy. IPP reads them too, to show the **Add photos**
+button only on a share the upload service would accept, so mount the same `config.json` into both containers.
+
+## `requireRandomKey`
+
+**Type:** `bool` · **Default:** `true`
+
+Refuse uploads through a share's custom URL (`/s/<slug>`). A custom URL is chosen to be readable, so it can be
+guessed; the generated key cannot. The gallery opened by its custom URL shows no **Add photos** button.
+
+## `requireExpiry`
+
+**Type:** `bool` · **Default:** `true`
+
+Refuse uploads through a link that never expires, or that expires later than [`maxExpiryDays`](#maxexpirydays) from
+now. A link can be copied by anyone it reaches, so only an end date takes the upload right away from them.
+
+## `maxExpiryDays`
+
+**Type:** `int` · **Default:** `30`
+
+The furthest away, in days, that an upload link's expiry date may be when [`requireExpiry`](#requireexpiry) is on.
+`0` accepts any expiry date, as long as there is one.
+
+## `requirePassword`
+
+**Type:** `bool` · **Default:** `false`
+
+Refuse uploads through a link that has no password in Immich.
+
+## `maxAssets`
+
+**Type:** `int` · **Default:** `500`
+
+Refuse uploads into an album that already holds this many photos and videos, counting the owner's own. It is the only
+limit on the total: [`maxFileSize`](#maxfilesize) bounds one file, and [`byteBudget`](#bytebudget) one hour. `0` turns
+the limit off.
+
 ## Shared options
 
 The service also reads two IPP options, with the same meaning:
@@ -205,7 +251,7 @@ one of these codes and a short reason, which the page shows to the visitor:
 | Code | Reason                                                                                                           |
 |------|------------------------------------------------------------------------------------------------------------------|
 | 400  | The file is empty, the filename has no extension, or Immich refused the file, for example because the owner's storage quota is full. |
-| 403  | The share no longer accepts uploads.                                                                             |
+| 403  | The share no longer accepts uploads, or the link fails the upload policy above, for example the album is full or the link has expired. The body also carries a `reason` code. |
 | 411  | The request has no `Content-Length` header.                                                                      |
 | 413  | The file is larger than `maxFileSize`, sent more bytes than its `Content-Length` declared, or the share has used its `byteBudget` for the hour. |
 | 415  | The file is not a photo or a video. SVG files are refused, by media type and by extension.                       |

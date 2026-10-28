@@ -232,8 +232,8 @@ Set [`uploadUrl`](/config/ipp-options#uploadurl) in IPP's config to the upload h
 ```
 
 IPP reads its config from a `config.json` mounted at `/app/config.json`, or inline from the `CONFIG` environment
-variable; see [Configuration](/config/). One `config.json` can serve both containers: IPP ignores the `ipp.upload.*`
-keys, and the upload service reads only those and [two shared options](/config/upload-service#shared-options).
+variable; see [Configuration](/config/). One `config.json` can serve both containers: IPP reads only the
+[upload policy](/config/upload-service#albumonly) among the `ipp.upload.*` keys, and the upload service reads only those and [two shared options](/config/upload-service#shared-options).
 
 ### Check the route
 
